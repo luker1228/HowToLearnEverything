@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review Log Event Schema",
+  "type": "object",
+  "required": [
+    "pointId",
+    "pointPath",
+    "reviewedAt",
+    "grade",
+    "masteryBefore",
+    "masteryAfter",
+    "intervalDaysBefore",
+    "intervalDaysAfter",
+    "nextReviewAt"
+  ],
+  "properties": {
+    "pointId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*$"
+    },
+    "pointPath": {
+      "type": "string",
+      "pattern": "^points/.+\\.md$"
+    },
+    "reviewedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "grade": {
+      "type": "string",
+      "enum": ["again", "hard", "good", "easy"]
+    },
+    "masteryBefore": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "masteryAfter": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "intervalDaysBefore": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "intervalDaysAfter": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nextReviewAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

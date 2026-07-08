@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Learning Point Frontmatter Schema",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "domain",
+    "type",
+    "level",
+    "tags",
+    "relate",
+    "estimatedMinutes",
+    "status",
+    "mastery",
+    "confidence",
+    "reviewCount",
+    "lapseCount",
+    "intervalDays",
+    "ease",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["knowledge", "concept", "skill", "task", "project"]
+    },
+    "level": {
+      "type": "string",
+      "enum": ["basic", "intermediate", "advanced"]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$"
+      }
+    },
+    "relate": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(\\.\\.?/|[a-zA-Z0-9_-]).*\\.md$"
+      }
+    },
+    "estimatedMinutes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["todo", "learning", "learned", "reviewing", "mastered", "paused"]
+    },
+    "mastery": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "lastStudiedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "lastReviewedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "nextReviewAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "reviewCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lapseCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "intervalDays": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ease": {
+      "type": "number",
+      "minimum": 1.3,
+      "maximum": 3.0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date"
+    }
+  },
+  "additionalProperties": false
+}

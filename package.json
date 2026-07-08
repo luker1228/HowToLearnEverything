@@ -10,5 +10,8 @@
     "mdtree": "./bin/mdtree",
     "check": "./bin/mdtree check .",
     "index": "./bin/mdtree index ."
+  },
+  "dependencies": {
+    "cac": "^7.0.0"
   }
 }

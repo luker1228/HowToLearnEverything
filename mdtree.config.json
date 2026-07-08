@@ -1,8 +1,12 @@
 {
+  "workspace": "./wiki",
+  "categories": [
+    "cs",
+    "ai",
+    "english"
+  ],
   "ignore": [
     "**/node_modules/**",
-    "**/.git/**",
-    "**/index.md"
-  ],
-  "indexOutput": "./index.md"
+    "**/.git/**"
+  ]
 }

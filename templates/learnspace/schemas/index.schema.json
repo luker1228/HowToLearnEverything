@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Learning Index Schema",
+  "type": "object",
+  "required": ["schemaVersion", "goalId", "generatedAt", "points"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "goalId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "path",
+          "domain",
+          "type",
+          "level",
+          "status",
+          "mastery",
+          "confidence",
+          "tags",
+          "relate"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)*$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^points/.+\\.md$"
+          },
+          "domain": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["knowledge", "concept", "skill", "task", "project"]
+          },
+          "level": {
+            "type": "string",
+            "enum": ["basic", "intermediate", "advanced"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["todo", "learning", "learned", "reviewing", "mastered", "paused"]
+          },
+          "mastery": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5
+          },
+          "confidence": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "nextReviewAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            }
+          },
+          "relate": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(\\.\\.?/|[a-zA-Z0-9_-]).*\\.md$"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
