@@ -1,0 +1,3 @@
+[submodule "schemaX-me"]
+	path = schemaX-me
+	url = https://github.com/luker1228/schemaX-me.git
