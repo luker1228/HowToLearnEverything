@@ -1,0 +1,14 @@
+{
+  "name": "mdtree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "mdtree": "./bin/mdtree"
+  },
+  "scripts": {
+    "mdtree": "./bin/mdtree",
+    "check": "./bin/mdtree check .",
+    "index": "./bin/mdtree index ."
+  }
+}
