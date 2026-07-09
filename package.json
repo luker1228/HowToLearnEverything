@@ -1,17 +1,12 @@
 {
-  "name": "mdtree",
+  "name": "learn",
   "version": "0.1.0",
   "private": true,
   "type": "commonjs",
   "bin": {
-    "mdtree": "./bin/mdtree"
+    "learn": "./bin/learn"
   },
   "scripts": {
-    "mdtree": "./bin/mdtree",
-    "check": "./bin/mdtree check .",
-    "index": "./bin/mdtree index ."
-  },
-  "dependencies": {
-    "cac": "^7.0.0"
+    "learn": "./bin/learn"
   }
 }
