@@ -1,0 +1,82 @@
+[
+  {
+    "query": "我想开始今天的英语课，上次学了 present perfect，今天能不能继续练一下这个时态？",
+    "should_trigger": true
+  },
+  {
+    "query": "帮我准备雅思口语 part 2，题目是描述一个你去过的地方，我想先说一遍然后你给我纠错",
+    "should_trigger": true
+  },
+  {
+    "query": "我写了一封给客户的英文邮件，帮我看看有没有表达不地道的地方，然后把它改造成今天的课程材料",
+    "should_trigger": true
+  },
+  {
+    "query": "我英语说起来总是磕磕绊绊的，想系统练一下口语流利度，你能帮我制定一个训练计划吗？每天大概有45分钟",
+    "should_trigger": true
+  },
+  {
+    "query": "今天开始课 — 我昨天作业没做完，你能直接带我进入今天训练吗？",
+    "should_trigger": true
+  },
+  {
+    "query": "我发现我在会议里经常听不懂 native speaker 说的话，尤其是他们说得快的时候。想专门练这个",
+    "should_trigger": true
+  },
+  {
+    "query": "帮我生成一份12周英语提升计划，我是B2水平，目标是口语和写作都有明显提升",
+    "should_trigger": true
+  },
+  {
+    "query": "我刚看完一集美剧（Succession S02E03），里面有几句话没听懂，我把台词贴给你，能不能拿这个当今天的听力材料来上课？",
+    "should_trigger": true
+  },
+  {
+    "query": "我总是把 'I suggest you to do' 和 'I suggest doing' 搞混，能给我做个专项练习吗？",
+    "should_trigger": true
+  },
+  {
+    "query": "我想做英语错题本，把我最近一个月犯的语法错误整理出来，然后按类型复习",
+    "should_trigger": true
+  },
+  {
+    "query": "帮我把这篇文章翻译成中文，里面有一些技术词汇我不太确定怎么翻比较准确",
+    "should_trigger": false
+  },
+  {
+    "query": "我想学一首英文歌的歌词，帮我查一下 Coldplay 的 Yellow 的完整歌词",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我写一封英文求职信，投给 Google 的 PM 职位，要突出我在产品设计上的经验",
+    "should_trigger": false
+  },
+  {
+    "query": "Python 里 list comprehension 和 map 哪个更快？帮我跑个 benchmark 测一下",
+    "should_trigger": false
+  },
+  {
+    "query": "我想提高英语，推荐几本适合B2水平的英文原版小说",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我解释一下 'leverage' 这个词在商业场景里的用法，给几个例句",
+    "should_trigger": false
+  },
+  {
+    "query": "我需要准备一个英文技术演讲，帮我把这份 slide 的文字改得更正式一点",
+    "should_trigger": true
+  },
+  {
+    "query": "这段英文合同我有几个地方看不懂，帮我解释一下 'indemnification clause' 是什么意思",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我检查一下我写的这段英文代码注释，语法有没有问题",
+    "should_trigger": false
+  },
+  {
+    "query": "我想学日语，有没有什么好的入门方法？我之前学过英语所以有一点语言学习经验",
+    "should_trigger": false
+  }
+]
