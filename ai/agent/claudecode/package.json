@@ -1,0 +1,24 @@
+{
+  "name": "claudecode",
+  "version": "1.0.0",
+  "description": "TypeScript and Node.js learning workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-transform-types src/index.ts",
+    "lesson:01": "node --experimental-transform-types src/lessons/step1/01-types.ts",
+    "lesson:02": "node --experimental-transform-types src/lessons/step1/02-agent-loop.ts",
+    "lesson:03": "node --experimental-transform-types src/lessons/step1/03-tool-use.ts",
+    "lesson:04": "node --experimental-transform-types src/lessons/step1/04-permission.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
