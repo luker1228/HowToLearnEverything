@@ -1,0 +1,6 @@
+interface:
+  display_name: "上传图片到 COS"
+  short_description: "把本地图片上传到腾讯 COS，并返回可插入 Markdown 的公开链接"
+  default_prompt: "Use $upload-images-to-cos to 上传这几张本地图片到腾讯 COS，返回公开链接，并在需要时顺手插入 Markdown。"
+policy:
+  allow_implicit_invocation: true
