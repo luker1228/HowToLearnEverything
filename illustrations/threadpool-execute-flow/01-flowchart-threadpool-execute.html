@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ThreadPoolExecutor.execute 决策流程</title>
+<style>
+  :root {
+    --bg: #FAFAFA;
+    --card: #FFFFFF;
+    --ink: #1A1A1A;
+    --muted: #5A5A5A;
+    --line: #1A1A1A;
+    --decision: #A8D4F0;
+    --action: #F9E79F;
+    --queue: #FADBD8;
+    --reject: #F5B7B1;
+    --yes: #1F6F63;
+    --no: #555555;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .canvas {
+    width: 960px;
+    margin: 0 auto;
+    padding: 40px 36px 40px;
+    background: var(--bg);
+  }
+
+  .title {
+    text-align: center;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    margin-bottom: 10px;
+    color: var(--ink);
+  }
+
+  .subtitle {
+    text-align: center;
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 36px;
+  }
+
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* Shared grid: left spacer | main column | right branch */
+  .stage {
+    display: grid;
+    grid-template-columns: 1fr 300px 1fr;
+    width: 100%;
+    align-items: center;
+    margin: 0;
+  }
+
+  .stage .main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .stage .side {
+    display: flex;
+    align-items: center;
+    padding-left: 4px;
+    min-height: 1px;
+  }
+
+  .node {
+    border: 2px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 20px;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.45;
+    background: var(--card);
+    min-width: 200px;
+    max-width: 280px;
+  }
+
+  .node.start {
+    border-width: 2.5px;
+    font-size: 17px;
+    padding: 18px 24px;
+    background: #FFFFFF;
+  }
+
+  .node.action {
+    background: var(--action);
+  }
+
+  .node.queue {
+    background: var(--queue);
+  }
+
+  .node.reject {
+    background: var(--reject);
+    font-size: 17px;
+    min-width: 240px;
+  }
+
+  /* Decision as rounded rect (clearer than diamond overlap issues) */
+  .decision {
+    width: 280px;
+    min-height: 88px;
+    background: var(--decision);
+    border: 2.5px solid var(--line);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.45;
+    padding: 16px 18px;
+    position: relative;
+  }
+
+  .decision::before {
+    content: "";
+    position: absolute;
+    left: -10px;
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    width: 14px;
+    height: 14px;
+    background: var(--decision);
+    border-left: 2.5px solid var(--line);
+    border-bottom: 2.5px solid var(--line);
+  }
+
+  .decision.diamond-style {
+    width: 200px;
+    height: 200px;
+    min-height: 200px;
+    border-radius: 18px;
+    transform: rotate(45deg);
+    padding: 0;
+  }
+
+  .decision.diamond-style span {
+    transform: rotate(-45deg);
+    display: block;
+    width: 150px;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .decision.diamond-style::before { display: none; }
+
+  /* Connectors */
+  .v-join {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    grid-column: 1 / -1;
+  }
+
+  .v-join-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .v-line {
+    width: 2.5px;
+    height: 26px;
+    background: var(--line);
+  }
+
+  .v-line.short { height: 18px; }
+
+  .arrow-down {
+    width: 0;
+    height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 11px solid var(--line);
+  }
+
+  .h-branch {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    position: relative;
+    gap: 0;
+  }
+
+  .h-line {
+    height: 2.5px;
+    background: var(--line);
+    width: 36px;
+    flex-shrink: 0;
+  }
+
+  .arrow-right {
+    width: 0;
+    height: 0;
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
+    border-left: 11px solid var(--line);
+    flex-shrink: 0;
+  }
+
+  .tag {
+    font-size: 13px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+    border: 1.5px solid currentColor;
+    background: #FFFFFF;
+    line-height: 1.2;
+  }
+
+  .tag.yes {
+    color: var(--yes);
+    position: absolute;
+    top: -22px;
+    left: 8px;
+  }
+
+  .tag.no {
+    color: var(--no);
+    margin: 6px 0 4px;
+  }
+
+  .spacer-down {
+    height: 8px;
+  }
+
+  .legend {
+    margin-top: 44px;
+    display: flex;
+    justify-content: center;
+    gap: 22px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .swatch {
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--line);
+    border-radius: 4px;
+  }
+
+  .swatch.decision { background: var(--decision); border-radius: 4px; }
+  .swatch.action { background: var(--action); }
+  .swatch.queue { background: var(--queue); }
+  .swatch.reject { background: var(--reject); }
+
+  .note {
+    margin-top: 14px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  /* Diamond alternative with enough box space */
+  .dbox {
+    width: 210px;
+    height: 210px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 8px 0;
+  }
+
+  .dbox .diamond {
+    width: 148px;
+    height: 148px;
+    background: var(--decision);
+    border: 2.5px solid var(--line);
+    border-radius: 16px;
+    transform: rotate(45deg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .dbox .diamond span {
+    transform: rotate(-45deg);
+    width: 140px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <h1 class="title">ThreadPoolExecutor.execute 决策流程</h1>
+    <p class="subtitle">核心线程 → 工作队列 → 非核心线程 → 拒绝策略</p>
+
+    <div class="flow">
+      <!-- Start -->
+      <div class="stage">
+        <div></div>
+        <div class="main">
+          <div class="node start">提交一个任务（execute）</div>
+        </div>
+        <div></div>
+      </div>
+
+      <div class="v-join"><div class="v-join-inner">
+        <div class="v-line"></div>
+        <div class="arrow-down"></div>
+      </div></div>
+
+      <!-- D1 -->
+      <div class="stage">
+        <div></div>
+        <div class="main">
+          <div class="dbox">
+            <div class="diamond"><span>当前线程数<br/>&lt; corePoolSize ?</span></div>
+          </div>
+        </div>
+        <div class="side">
+          <div class="h-branch">
+            <div class="h-line"></div>
+            <span class="tag yes">是</span>
+            <div class="arrow-right"></div>
+            <div class="node action" style="margin-left: 8px;">创建核心线程，<br/>直接跑这个任务</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="v-join"><div class="v-join-inner">
+        <span class="tag no">否</span>
+        <div class="v-line short"></div>
+        <div class="arrow-down"></div>
+      </div></div>
+
+      <!-- D2 -->
+      <div class="stage">
+        <div></div>
+        <div class="main">
+          <div class="dbox">
+            <div class="diamond"><span>队列没满 ?</span></div>
+          </div>
+        </div>
+        <div class="side">
+          <div class="h-branch">
+            <div class="h-line"></div>
+            <span class="tag yes">是</span>
+            <div class="arrow-right"></div>
+            <div class="node queue" style="margin-left: 8px;">任务塞进队列排队</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="v-join"><div class="v-join-inner">
+        <span class="tag no">否（队列满了）</span>
+        <div class="v-line short"></div>
+        <div class="arrow-down"></div>
+      </div></div>
+
+      <!-- D3 -->
+      <div class="stage">
+        <div></div>
+        <div class="main">
+          <div class="dbox">
+            <div class="diamond"><span>当前线程数<br/>&lt; maximumPoolSize ?</span></div>
+          </div>
+        </div>
+        <div class="side">
+          <div class="h-branch">
+            <div class="h-line"></div>
+            <span class="tag yes">是</span>
+            <div class="arrow-right"></div>
+            <div class="node action" style="margin-left: 8px;">创建非核心线程，<br/>直接跑这个任务</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="v-join"><div class="v-join-inner">
+        <span class="tag no">否（线程也到上限了）</span>
+        <div class="v-line short"></div>
+        <div class="arrow-down"></div>
+      </div></div>
+
+      <!-- Reject -->
+      <div class="stage">
+        <div></div>
+        <div class="main">
+          <div class="node reject">执行拒绝策略</div>
+        </div>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><span class="swatch" style="background:#A8D4F0;"></span>判断条件</div>
+      <div class="legend-item"><span class="swatch" style="background:#F9E79F;"></span>创建线程执行</div>
+      <div class="legend-item"><span class="swatch" style="background:#FADBD8;"></span>入队等待</div>
+      <div class="legend-item"><span class="swatch" style="background:#F5B7B1;"></span>拒绝策略</div>
+    </div>
+    <p class="note">Java ThreadPoolExecutor · execute() 提交路径</p>
+  </div>
+</body>
+</html>
