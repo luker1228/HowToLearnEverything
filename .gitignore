@@ -1,0 +1,6 @@
+
+# secrets / local env
+.env
+.env.*
+**/.env
+**/.env.*
