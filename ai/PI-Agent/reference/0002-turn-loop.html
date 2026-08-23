@@ -15,7 +15,7 @@
 </head>
 <body>
 
-<div class="nav"><a href="../lessons/0002-turn-loop.html">← Lesson 2</a> · <a href="0001-agent-architecture-overview.html">参考卡片 1：架构总览</a></div>
+<div class="nav"><a href="../lessons/0002-turn-loop.html">← Lesson 2</a> · <a href="0001-agent-architecture-overview.html">参考卡片 1：架构总览</a> · <a href="0003-tool-call-lifecycle.html">参考卡片 3：工具调用生命周期 →</a></div>
 
 <p class="kicker">参考卡片 · Reference</p>
 <h1>Turn 循环：一次 prompt() 内部跑几轮？</h1>
@@ -37,7 +37,7 @@
 <tr><td>自然停下</td><td>assistant 这轮回复不含任何 <code>toolCall</code></td><td>模型自己</td></tr>
 <tr><td>被叫停</td><td><code>shouldStopAfterTurn</code> 返回 <code>true</code></td><td>应用层配置（轮数上限、预算上限等）</td></tr>
 </table>
-<p>两条路径殊途同归：都会 <code>emit({ type: "agent_end", messages: newMessages })</code> 后 <code>return</code>。</p>
+<p>两条路径殊途同归：都会 <code>emit({ type: "agent_end", messages: newMessages })</code> 后 <code>return</code>。（细节补充：工具也能让「自然停下」这条路径提前触发——见<a href="0003-tool-call-lifecycle.html">参考卡片 3</a> 的 <code>terminate</code> 彩蛋。）</p>
 
 <h2><code>turn_end</code> vs <code>agent_end</code></h2>
 <p><code>turn_end</code> = 「一次 LLM 调用 + 它触发的整批工具调用（0~N 个，一起算一轮）跑完了」，<strong>不是</strong>「一次工具调用跑完了」——如果这轮 assistant 消息里有 3 个 <code>toolCall</code>，无论顺序还是并行执行，3 个全部结束才发一次 <code>turn_end</code>。</p>
@@ -52,6 +52,15 @@ turn_end                        整批都结束后才发一次</pre>
   ...                            │
   turn_start → ... → turn_end   ─┘ ← 最后一次，紧跟着触发停止
 agent_end</pre>
+
+<h2>一个 tool_call 会跨 turn 吗？—— 不会</h2>
+<p>常见误解：以为一个 tool_call 可能"跨好几个 turn 才执行完"。实际上 <code>tool_execution_start → (若干次 tool_execution_update) → tool_execution_end</code> 这整条链路，<strong>100% 包含在它所属的那一个 turn 里</strong>，因为 <code>runLoop</code> 会 <code>await executeToolCalls(...)</code> 到这批工具全部跑完，才往下走到 <code>emit({ type: "turn_end" })</code>（<code>agent-loop.ts:214-224</code>）——结构上不可能提前发 <code>turn_end</code>。</p>
+<p>真正会跨多个 turn 的，是「<strong>模型反复多次调用同一个工具</strong>」（比如连续搜索 3 次）——但那是 <strong>3 个独立的 tool_call</strong>（各有自己的 <code>toolCallId</code>），分别绑定在 3 个不同的 turn 里，不是同一个 tool_call 跨了 3 个 turn。</p>
+<table>
+<tr><th></th><th>是否跨 turn</th></tr>
+<tr><td>同一个 <code>toolCallId</code>（一次调用）</td><td>❌ 绝不跨 turn，当轮开始当轮结束</td></tr>
+<tr><td>同一个工具被多次调用</td><td>✓ 很正常，每次调用各自占一个 turn</td></tr>
+</table>
 
 <h2>Harness 工程 vs. Loop 工程（别混淆）</h2>
 <table>

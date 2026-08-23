@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · 工具调用生命周期</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0003-tool-call-lifecycle.html">← Lesson 3</a> · <a href="0002-turn-loop.html">参考卡片 2：Turn 循环</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>一次工具调用的五道关</h1>
+<p class="subtitle">配套 Lesson 3。可打印，随时回来查。</p>
+
+<h2>生命周期</h2>
+<table>
+<tr><th>关卡</th><th>代码</th><th>可选?</th><th>失败/拒绝时怎么办</th></tr>
+<tr><td>① 找工具</td><td><code>tools?.find(t => t.name === toolCall.name)</code></td><td>—</td><td>找不到 → 立即报错结果</td></tr>
+<tr><td>② 校验参数</td><td><code>prepareToolCallArguments</code> + <code>validateToolArguments</code></td><td>—</td><td>校验失败 → 立即报错结果</td></tr>
+<tr><td>③ 事前审批</td><td><code>config.beforeToolCall</code></td><td>可选钩子</td><td><code>block: true</code> → 变成 <code>isError:true</code> 的 toolResult，<strong>工具不会被执行</strong></td></tr>
+<tr><td>④ 执行</td><td><code>tool.execute(id, args, signal, onUpdate)</code></td><td>—</td><td>抛异常 → 捕获成报错结果</td></tr>
+<tr><td>⑤ 事后验证</td><td><code>config.afterToolCall</code></td><td>可选钩子</td><td>可改写 <code>content</code>/<code>details</code>/<code>usage</code>/<code>isError</code>/<code>terminate</code></td></tr>
+</table>
+
+<h2>核心设计原则：拒绝 = 一种工具失败</h2>
+<p>《深入理解 AI Agent》第四章：「审批失败后不应简单重试，而应<strong>将拒绝理由作为工具调用结果加入 Agent 的轨迹</strong>」。代码实现：<code>beforeToolCall</code> 的 <code>block</code> 走 <code>createErrorToolResult(reason)</code>，和工具真正抛异常时完全同一条路径——不需要给"被拒绝"单独发明一套处理逻辑，Agent 已经会处理"工具失败"了。</p>
+
+<h2><code>beforeToolCall</code> vs <code>afterToolCall</code> 权力对比</h2>
+<table>
+<tr><th></th><th>时机</th><th>能做什么</th><th>书里叫法</th></tr>
+<tr><td><code>beforeToolCall</code></td><td>执行前</td><td>放行 / 拦截（二选一）</td><td>事前审批</td></tr>
+<tr><td><code>afterToolCall</code></td><td>执行后</td><td>改写结果的任意字段，包括把成功改判为失败</td><td>事后验证</td></tr>
+</table>
+
+<h2>terminate 彩蛋：工具让循环自然停下</h2>
+<pre>function shouldTerminateToolBatch(finalizedCalls) {
+  return finalizedCalls.length > 0 && finalizedCalls.every(f => f.result.terminate === true);
+}</pre>
+<p>这一批工具<strong>全部</strong>返回 <code>terminate: true</code> → <code>hasMoreToolCalls = false</code> → 循环表现得跟"这轮模型没调用任何工具"一样，自然停下。<strong>不是</strong>第三条独立退出路径，是「自然停下」这条路径的一个特殊触发方式——见 <a href="0002-turn-loop.html">参考卡片 2</a> 的退出路径表。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>ai-agent-book/book/chapter4.md</code>（事前审批 / 事后验证 / Proposer-Reviewer）</li>
+<li><code>pi/packages/agent/src/agent-loop.ts</code> 第 600-758 行（<code>prepareToolCall</code> / <code>executePreparedToolCall</code> / <code>finalizeExecutedToolCall</code>）</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 3 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

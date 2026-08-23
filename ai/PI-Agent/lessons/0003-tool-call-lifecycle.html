@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 3 · 一次工具调用的生命周期</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0002-turn-loop.html">← Lesson 2</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0003-tool-call-lifecycle.html">参考卡片：工具调用生命周期 →</a></div>
+
+<p class="kicker">Lesson 3 · pi-agent-core</p>
+<h1>一次工具调用的生命周期</h1>
+<p class="subtitle">目标：打开上一课故意跳过的黑箱——一个 <code>toolCall</code> 从「模型说要调用」到「变成一条 <code>toolResult</code> 消息」，中间到底经过了几道关卡。</p>
+
+<div class="quiz" data-answer="不跨;不会跨;不跨turn;不会跨turn">
+<div class="q-prompt">热身回忆：上一课确认过，一个 tool_call（同一个 toolCallId）会不会跨 turn？</div>
+<input type="text" class="q-input" placeholder="会跨 / 不跨">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>1. 书里的框架：事前审批 vs 事后验证</h2>
+
+<p>《深入理解 AI Agent》第四章讨论「执行工具」的安全机制时，给出了两种审查时机：</p>
+
+<blockquote>第一种机制是<strong>事前审批</strong>：在工具执行前，一个模型负责提议行动（Proposer），另一个独立的模型负责审查并批准（Reviewer）……<br>提议者-审核者机制解决的是「操作执行前审批或操作完成后验证」的问题。</blockquote>
+
+<p>还有一句对理解代码特别关键：</p>
+
+<blockquote>审批失败后不应简单重试，而应<strong>将拒绝理由作为工具调用结果加入 Agent 的轨迹</strong>……Agent 已经具备处理工具失败的能力，审批机制只是一个新的输入源。</blockquote>
+
+<p>记住这句话——下面看代码时会发现它被原封不动地实现了出来。</p>
+
+<h2>2. 对照代码：一次调用要过五道关</h2>
+
+<p><code>agent-loop.ts</code> 里，一个 <code>toolCall</code> 依次经过 <code>prepareToolCall</code> → <code>executePreparedToolCall</code> → <code>finalizeExecutedToolCall</code> 三个函数，可以拆成五道关：</p>
+
+<table>
+<tr><th>关卡</th><th>代码位置</th><th>对应书里的概念</th></tr>
+<tr><td>① 找工具</td><td><code>currentContext.tools?.find(...)</code></td><td>——</td></tr>
+<tr><td>② 校验/整理参数</td><td><code>prepareToolCallArguments</code> + <code>validateToolArguments</code></td><td>参数保真性检查</td></tr>
+<tr><td>③ <strong>事前审批</strong></td><td><code>config.beforeToolCall</code>（<code>agent-loop.ts:619-647</code>）</td><td>Proposer-Reviewer「事前审批」</td></tr>
+<tr><td>④ 真正执行</td><td><code>tool.execute(id, args, signal, onUpdate)</code></td><td>骨架里的 <code>Environment.apply()</code></td></tr>
+<tr><td>⑤ <strong>事后验证</strong></td><td><code>config.afterToolCall</code>（<code>agent-loop.ts:724-751</code>）</td><td>Proposer-Reviewer「事后验证」</td></tr>
+</table>
+
+<p>③ 和 ⑤ 都是<strong>可选钩子</strong>——不传就直接跳过，工具照常执行。它们的形状不一样，权力也不一样：</p>
+
+<ul>
+<li><strong><code>beforeToolCall</code></strong> 只能二选一：放行，或者 <code>block</code>（附一句 <code>reason</code>）。一旦 <code>block</code>，工具<strong>根本不会被执行</strong>。</li>
+<li><strong><code>afterToolCall</code></strong> 权力更大：工具已经跑完了，但它可以<strong>改写</strong>结果的 <code>content</code>、<code>details</code>、<code>usage</code>，甚至把 <code>isError</code> 从 false 改成 true——这就是「验证不通过就纠正」。</li>
+</ul>
+
+<h2>3. 被拒绝的调用，去哪了？</h2>
+
+<p>这里就是书里那句话的实现。<code>beforeToolCall</code> 一旦 <code>block</code>，代码是这么处理的：</p>
+
+<pre>if (beforeResult?.block) {
+    const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+    return { kind: "immediate", result, isError: true };
+    // ↑ 走的是和「工具真正执行失败」完全一样的路径
+}</pre>
+
+<p>被拒绝的调用<strong>不会被特殊处理、也不会中断整个 Agent</strong>——它照样变成一条 <code>toolResult</code> 消息（只是 <code>isError: true</code>，内容是拒绝理由），塞进上下文，模型在下一轮会看到这条"失败反馈"，自己决定要不要换个方式重试。这正是"审批拒绝就像一次工具调用失败"——复用同一条反馈通道，不用给 Agent 单独发明一套"被拒绝"的应对逻辑。</p>
+
+<div class="quiz" data-answer="toolresult;toolResultMessage;工具结果;tool result">
+<div class="q-prompt">小测验 1：<code>beforeToolCall</code> 返回 <code>block: true</code> 之后，这次调用最终会变成塞进上下文的哪一种消息（角色/类型）？</div>
+<input type="text" class="q-input" placeholder="填消息角色/类型">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<div class="quiz" data-answer="事前审批;事前">
+<div class="q-prompt">小测验 2：<code>beforeToolCall</code> 对应书里第四章说的「事前审批」还是「事后验证」？</div>
+<input type="text" class="q-input" placeholder="填四个字">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>4. 一个彩蛋：工具居然能让整个循环停下</h2>
+
+<p>上一课我们说退出路径只有两条——「模型不调工具」和「<code>shouldStopAfterTurn</code> 叫停」。这里要补一个细节：<code>afterToolCall</code>（或工具自己）可以在结果里设置 <code>result.terminate = true</code>。如果<strong>这一批工具全都</strong> <code>terminate: true</code>，<code>hasMoreToolCalls</code> 会被强制置为 <code>false</code>——即使模型明明调用了工具，循环也会当成「没有更多工具调用」一样自然停下。</p>
+
+<pre>function shouldTerminateToolBatch(finalizedCalls) {
+  return finalizedCalls.length > 0 && finalizedCalls.every(f => f.result.terminate === true);
+}</pre>
+
+<p>典型用法：一个「把控制权交还给用户」或「任务已完成」的工具，执行完之后不希望模型再继续说下去——它可以直接把 <code>terminate: true</code> 写进自己的结果里。严格说，这不是第三条退出路径，而是「模型不调工具」这条路径的一个特殊变体：<strong>工具调用发生了，但它的结果让循环表现得像没发生过一样</strong>。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">一个工具的执行结果把 <code>terminate</code> 设成 <code>true</code>，对整轮 turn 循环意味着什么？</div>
+<div class="q-options">
+<button class="q-option" data-correct="true">让循环提前自然停下</button>
+<button class="q-option">强制重跑这次工具调用</button>
+<button class="q-option">跳过这次事后验证钩子</button>
+<button class="q-option">让模型换一个新工具用</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>下一步</h2>
+
+<p>建议这节课后：</p>
+<ol>
+<li>通读 <a href="https://bojieli.github.io/ai-agent-book/" target="_blank">《深入理解 AI Agent》第四章</a>「执行工具」一节，尤其 Proposer-Reviewer 和 Sidecar 机制那一段</li>
+<li>打开 <code>pi/packages/agent/src/agent-loop.ts</code> 第 600-758 行，跟着 <code>prepareToolCall → executePreparedToolCall → finalizeExecutedToolCall</code> 走一遍</li>
+</ol>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：事前审批、事后验证、terminate 彩蛋——任何没弄懂的地方都可以直接问我。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 3 of the pi-agent-core architecture course · <a href="../reference/0003-tool-call-lifecycle.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
