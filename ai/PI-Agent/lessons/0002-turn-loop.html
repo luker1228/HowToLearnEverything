@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 2 · 一轮 Turn 是怎么跑起来的</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0001-agent-big-picture.html">← Lesson 1</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0002-turn-loop.html">参考卡片：Turn 循环 →</a></div>
+
+<p class="kicker">Lesson 2 · pi-agent-core</p>
+<h1>一轮 Turn 是怎么跑起来的</h1>
+<p class="subtitle">目标：打开「引擎」<code>agent-loop.ts</code>，看清一次 <code>prompt()</code> 内部到底跑了几轮、什么时候继续、什么时候停。</p>
+
+<div class="quiz" data-answer="agent-loop.ts;runAgentLoop;runAgentLoopContinue">
+<div class="q-prompt">热身回忆：上一课说，<code>Agent</code> 类是仪表盘，真正不持有状态、纯函数式的「引擎」文件叫什么？</div>
+<input type="text" class="q-input" placeholder="填文件名或函数名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>1. 书里给的循环骨架</h2>
+
+<p>《深入理解 AI Agent》第一章给出过一段刻意简化的伪代码，描述任何 Agent 循环的最小骨架：</p>
+
+<pre>observation = Environment.observe()
+trajectory = [observation]
+while true:
+    actions = Model(Harness.build_context(trajectory))
+    if len(actions) == 0:
+        break
+    allowed_actions = Harness.constrain(actions)
+    observation = Environment.apply(allowed_actions)
+    if not Harness.verify(Environment):
+        observation = Harness.correct(Environment)
+    trajectory.append(allowed_actions, observation)</pre>
+
+<p>五个动作构成一个闭环：<strong>上下文与工具</strong>让 Agent 能做事；<strong>约束、验证、纠正</strong>让 Agent 不做错事。这一课我们只对照前两步——「模型采样下一步」和「没有更多动作就退出」——剩下的约束/验证/纠正留给下一课，因为那部分内容足够多，值得单独一课。</p>
+
+<h2>2. 对照真实代码：<code>runLoop</code> 的内层循环</h2>
+
+<p><code>agent-loop.ts</code> 里真正驱动一轮又一轮的，是 <code>runLoop()</code> 函数里的一个内层 <code>while</code> 循环，条件是一个叫 <code>hasMoreToolCalls</code> 的布尔变量：</p>
+
+<pre>let hasMoreToolCalls = true;
+while (hasMoreToolCalls || pendingMessages.length > 0) {
+    // ① 调 LLM，拿到 assistant 的这轮回复
+    const message = await streamAssistantResponse(...);
+
+    // ② 看这条回复里有没有工具调用
+    const toolCalls = message.content.filter(c => c.type === "toolCall");
+
+    hasMoreToolCalls = false;
+    if (toolCalls.length > 0) {
+        // 执行工具（下一课细讲）
+        hasMoreToolCalls = !executedToolBatch.terminate;
+    }
+
+    await emit({ type: "turn_end", message, toolResults });
+    if (await config.shouldStopAfterTurn?.(...)) {
+        await emit({ type: "agent_end", messages: newMessages });
+        return; // 强制停下
+    }
+}</pre>
+
+<table>
+<tr><th>骨架里的步骤</th><th>真实代码</th></tr>
+<tr><td><code>actions = Model(...)</code></td><td><code>streamAssistantResponse()</code>（调 LLM，见 <code>agent-loop.ts:281-372</code>）</td></tr>
+<tr><td><code>if len(actions) == 0: break</code></td><td>本轮 <code>message.content</code> 里没有 <code>toolCall</code> → <code>hasMoreToolCalls</code> 保持 <code>false</code> → 循环条件不满足，自然退出</td></tr>
+</table>
+
+<p>关键洞察：<strong>「继续跑下一轮」这件事，完全是由「assistant 这轮要不要调工具」决定的</strong>。模型自己选择不调任何工具（比如它认为任务做完了，直接回复文字），循环就自然停下——这是最常见的「自然结束」路径。</p>
+
+<div class="quiz" data-answer="hasMoreToolCalls">
+<div class="q-prompt">小测验 1：决定「这轮结束后还要不要再跑一轮」的那个布尔变量叫什么？</div>
+<input type="text" class="q-input" placeholder="填变量名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>3. 除了「自然停下」，还有「被叫停」</h2>
+
+<p>光靠模型自己决定不够——生产系统往往需要额外的强制刹车，比如「已经跑了 50 轮还没完成，强制停下防止跑飞」。这就是 <code>shouldStopAfterTurn</code> 钩子：每轮 <code>turn_end</code> 之后都会问一遍「要不要现在就停」，只要它返回 <code>true</code>，循环立刻 <code>return</code>，发出 <code>agent_end</code>。</p>
+
+<p>所以一次 <code>prompt()</code> 有且只有两条退出路径：</p>
+<ol>
+<li><strong>自然停下</strong>：assistant 某一轮的回复不含工具调用（<code>len(actions)==0</code> 的真实版本）</li>
+<li><strong>被叫停</strong>：<code>shouldStopAfterTurn</code> 返回 <code>true</code>（应用层强加的终止条件，比如轮数上限、预算上限）</li>
+</ol>
+
+<div class="callout">
+<p><strong>一个容易搞混的地方</strong>：书里第一章还提到一个更高层的概念叫「<strong>Loop 工程</strong>」——「把视野从单次运行扩展到跨轮次的持续自主运转：谁来发现下一件该做的事、何时验证、何时才算真正完成」。这节课讲的 turn 循环<strong>不是</strong> Loop 工程，它只是<strong>一次 <code>prompt()</code> 调用内部</strong>的反馈循环，属于书里定义的「<strong>Harness 工程</strong>」范畴——「涵盖上下文与工具接口、约束机制、验证手段、<strong>反馈循环</strong>和错误恢复等 Agent 边界内、模型之外的运行与治理机制」。Loop 工程关心的是<strong>跨越多次任务、甚至跨会话</strong>的自主运转（比如一个常驻后台、自己找活干的 Agent），层级比这节课讲的东西高一层。</p>
+</div>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">这一课讲的「没工具调用就停,否则继续下一轮」的 turn 循环,按书里的五阶段范式,属于哪一层?</div>
+<div class="q-options">
+<button class="q-option" data-correct="true">Harness工程：单次任务内的反馈循环</button>
+<button class="q-option">Loop工程：跨会话的持续自主运转</button>
+<button class="q-option">提示工程：单条指令的措辞优化</button>
+<button class="q-option">Graph工程：多节点执行图的编排</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>下一步</h2>
+
+<p>我们故意跳过了「工具到底怎么被执行的」——并行还是顺序、执行前后的 <code>beforeToolCall</code>/<code>afterToolCall</code> 钩子、参数校验失败怎么办。这些正好对应骨架里的 <code>constrain</code> / <code>verify</code> / <code>correct</code> 三步，也是《深入理解 AI Agent》第四章「工具」的核心内容——下一课我们专门啃这一块。</p>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：turn 循环、<code>hasMoreToolCalls</code>、Harness 工程 vs Loop 工程的边界——任何没弄懂的地方都可以直接问我。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 2 of the pi-agent-core architecture course · <a href="../reference/0002-turn-loop.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

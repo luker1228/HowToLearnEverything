@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · pi-agent-core 架构总览</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  /* Reference cards favour a slightly tighter, print-friendly layout. */
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0001-agent-big-picture.html">← Lesson 1</a> · <a href="../RESOURCES.md">Resources</a> · <a href="0002-turn-loop.html">参考卡片 2：Turn 循环 →</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>pi-agent-core 架构总览</h1>
+<p class="subtitle">配套 Lesson 1。可打印，随时回来查。</p>
+
+<h2>公式</h2>
+<p><strong>Agent = LLM（大脑） + 上下文（眼睛） + 工具（手脚）</strong>，来自《深入理解 AI Agent》第一章。加号是工程组合，不是数学加法。</p>
+
+<table>
+<tr><th>直觉</th><th>公式部件</th><th>Model 还是 Harness</th></tr>
+<tr><td>大脑</td><td>LLM</td><td>Model</td></tr>
+<tr><td>眼睛</td><td>上下文</td><td>Harness</td></tr>
+<tr><td>手脚</td><td>工具</td><td>Harness</td></tr>
+</table>
+
+<h2>关键文件一览</h2>
+<table>
+<tr><th>文件</th><th>角色</th></tr>
+<tr><td><code>src/agent.ts</code></td><td>有状态外壳：持有 state、订阅者列表、steering/follow-up 队列；把事件 reduce 成新状态</td></tr>
+<tr><td><code>src/agent-loop.ts</code></td><td>无状态的循环引擎：<code>runAgentLoop</code> / <code>runAgentLoopContinue</code>，每轮决定调 LLM、跑工具、还是停下</td></tr>
+<tr><td><code>src/types.ts</code></td><td>所有核心类型：<code>AgentMessage</code>、<code>AgentEvent</code>、<code>AgentTool</code>、<code>AgentState</code></td></tr>
+<tr><td><code>src/stream-fn.ts</code></td><td>默认的 LLM 调用函数（可被构造函数的 <code>streamFn</code> 覆盖）</td></tr>
+<tr><td><code>src/harness/tools/</code></td><td>工具相关的运行时支持</td></tr>
+<tr><td><code>src/harness/compaction/</code></td><td>上下文压缩——对应书中第二章「上下文工程」</td></tr>
+<tr><td><code>src/harness/session/</code></td><td>会话状态持久化——对应书中第三章「用户记忆和知识库」</td></tr>
+<tr><td><code>src/harness/env/</code></td><td>环境相关封装</td></tr>
+</table>
+
+<h2>消息处理管线</h2>
+<pre>AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → Message[] → LLM</pre>
+<ul>
+<li><strong>transformContext</strong>（可选）：裁剪旧消息、注入外部上下文</li>
+<li><strong>convertToLlm</strong>（必需，有默认实现）：过滤掉纯 UI 消息，把自定义消息类型转成 LLM 认识的 <code>user</code> / <code>assistant</code> / <code>toolResult</code></li>
+</ul>
+<p>为什么要区分：LLM 只认识 <code>user</code>/<code>assistant</code>/<code>toolResult</code> 三种角色，但应用层往往需要更丰富的消息类型（比如纯 UI 提示、系统事件），<code>AgentMessage</code> 通过声明合并（declaration merging）支持这些自定义类型。</p>
+
+<h2><code>AgentEvent</code> 全部 9 种（<code>src/types.ts</code>）</h2>
+<table>
+<tr><th>事件</th><th>何时触发</th></tr>
+<tr><td><code>agent_start</code></td><td>一次 <code>prompt()</code>/<code>continue()</code> 调用开始</td></tr>
+<tr><td><code>turn_start</code></td><td>一轮 turn（一次 LLM 调用 + 可能的工具执行）开始</td></tr>
+<tr><td><code>message_start</code></td><td>某条消息开始（用户消息或 assistant 消息）</td></tr>
+<tr><td><code>message_update</code></td><td>assistant 消息流式增量到达</td></tr>
+<tr><td><code>message_end</code></td><td>某条消息完成，被 push 进 <code>state.messages</code></td></tr>
+<tr><td><code>tool_execution_start</code></td><td>某个工具调用开始执行</td></tr>
+<tr><td><code>tool_execution_update</code></td><td>工具执行过程中的流式中间结果</td></tr>
+<tr><td><code>tool_execution_end</code></td><td>工具执行结束（成功或出错）</td></tr>
+<tr><td><code>turn_end</code></td><td>一轮 turn 结束，带上这轮的 assistant 消息和所有工具结果</td></tr>
+<tr><td><code>agent_end</code></td><td>整次 <code>prompt()</code>/<code>continue()</code> 调用结束，带上本次新增的全部消息</td></tr>
+</table>
+
+<h2><code>Agent</code> 的 state 字段</h2>
+<table>
+<tr><th>字段</th><th>含义</th></tr>
+<tr><td><code>systemPrompt</code></td><td>系统提示词</td></tr>
+<tr><td><code>model</code></td><td>当前使用的模型描述对象</td></tr>
+<tr><td><code>tools</code></td><td>当前可用的工具列表</td></tr>
+<tr><td><code>messages</code></td><td>完整的历史消息（上下文核心）</td></tr>
+<tr><td><code>isStreaming</code></td><td>是否正在等待/接收 LLM 输出</td></tr>
+<tr><td><code>streamingMessage</code></td><td>正在流式生成、尚未 <code>message_end</code> 的那条消息</td></tr>
+<tr><td><code>pendingToolCalls</code></td><td>正在执行、尚未返回结果的工具调用 id 集合</td></tr>
+<tr><td><code>errorMessage</code></td><td>本轮如果出错，错误信息</td></tr>
+</table>
+
+<h2>一手来源</h2>
+<ul>
+<li>《深入理解 AI Agent》第一章 — <a href="https://bojieli.github.io/ai-agent-book/" target="_blank">在线阅读</a></li>
+<li><code>pi/packages/agent/README.md</code> — Quick Start、事件时序图</li>
+<li><code>pi/packages/agent/src/types.ts</code> — 所有类型定义的最终真相来源</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 1 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

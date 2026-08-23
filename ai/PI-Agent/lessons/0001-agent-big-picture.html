@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 1 · 大图：Agent = LLM + 上下文 + 工具</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="../MISSION.md">Mission</a> · <a href="../RESOURCES.md">Resources</a> · <a href="../reference/0001-agent-architecture-overview.html">参考卡片：架构总览 →</a></div>
+
+<p class="kicker">Lesson 1 · pi-agent-core</p>
+<h1>大图：Agent = LLM + 上下文 + 工具</h1>
+<p class="subtitle">目标：读完这节课，你能一眼指出 <code>pi-agent-core</code> 源码里哪一段代码对应「大脑 / 眼睛 / 手脚」，并说清 <code>Agent</code> 类和 <code>agent-loop.ts</code> 谁负责什么。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：李博杰《深入理解 AI Agent》第一章「AI Agent 入门」。<a href="https://bojieli.github.io/ai-agent-book/" target="_blank">在线阅读</a>，本地也有源码：<code>ai-agent-book/book/chapter1.md</code>。建议正式学习前先通读一遍第一章开头的「现代 Agent = LLM + 上下文 + 工具」这一节，本课只摘取和代码直接对应的部分。</p>
+</div>
+
+<h2>1. 一个公式，三个部件</h2>
+
+<p>现代 Agent 的最小工程实现可以写成一个公式：</p>
+
+<blockquote>Agent = LLM（大脑） + 上下文（眼睛） + 工具（手脚）</blockquote>
+
+<p>这里的「+」是工程组件的组合，不是数学加法。三个词都要按广义理解：</p>
+
+<table>
+<tr><th>直觉</th><th>是什么</th><th>不是什么</th></tr>
+<tr><td><strong>大脑</strong>（LLM）</td><td>Agent 的决策内核：理解意图、规划、判断</td><td>不只是模型权重本身</td></tr>
+<tr><td><strong>眼睛</strong>（上下文）</td><td>每个决策点 Agent 手上握有的全部信息：历史消息、用户记忆、任务进展</td><td>不只是「喂给模型的一段 prompt 文本」</td></tr>
+<tr><td><strong>手脚</strong>（工具）</td><td>Agent 感知/改变外部世界的接口——定义、调用协议、适配器</td><td>不只是「函数调用」这一种形式</td></tr>
+</table>
+
+<p>书里还给出了一个更关键的分层：<strong>Model–Harness 结构</strong>。Model 只负责策略决策（也就是纯粹的 LLM 推理）；<strong>Harness</strong> 是环绕在 Model 外面的运行与治理层——它构造上下文、暴露工具接口、维护循环状态、做权限校验和纠错。用公式表达：<code>LLM = Model</code>，<code>上下文 + 工具 = 最小 Harness</code>。</p>
+
+<div class="callout">
+<p>这不是巧合——<code>pi-agent-core</code> 源码里真的有一个叫 <code>harness/</code> 的目录（<code>pi/packages/agent/src/harness/</code>），下面还分了 <code>tools/</code>、<code>compaction/</code>、<code>session/</code>、<code>env/</code> 四个子模块。这套代码库的作者显然也是照着这个 Model–Harness 心智模型设计的。</p>
+</div>
+
+<h2>2. 把公式对应到源码</h2>
+
+<table>
+<tr><th>公式部件</th><th>pi-agent-core 里对应什么</th><th>在哪个文件</th></tr>
+<tr><td>大脑（LLM）</td><td>不在这个包里！由 <code>streamFn</code> 参数注入（来自 <code>@earendil-works/pi-ai</code>），<code>Agent</code> 只负责<em>调用</em>它</td><td><code>src/agent.ts</code>（<code>streamFunction</code> 字段）</td></tr>
+<tr><td>眼睛（上下文）</td><td><code>systemPrompt</code> + <code>messages</code>，外加一条处理管线把「App 消息」转成「LLM 消息」</td><td><code>src/types.ts</code>（<code>AgentMessage</code>）、<code>src/agent.ts</code>（<code>state.messages</code>）</td></tr>
+<tr><td>手脚（工具）</td><td><code>AgentTool[]</code>，工具的定义、执行前后钩子（<code>beforeToolCall</code>/<code>afterToolCall</code>）</td><td><code>src/types.ts</code>（<code>AgentTool</code>）、<code>src/harness/tools/</code></td></tr>
+<tr><td>Harness（运行与治理层）</td><td>驱动整个循环、管理会话状态、压缩历史消息</td><td><code>src/agent-loop.ts</code> + <code>src/harness/*</code></td></tr>
+</table>
+
+<p>注意大脑这一格：<strong><code>pi-agent-core</code> 本身不包含任何模型推理代码</strong>。它通过构造函数注入的 <code>streamFn</code> 与真正的 LLM 解耦——这是一种依赖注入。这也是为什么这个包的 <code>package.json</code> 描述自己是「transport abstraction, state management」而不是「LLM wrapper」。</p>
+
+<div class="quiz" data-answer="messages;state.messages;this._state.messages">
+<div class="q-prompt">小测验 1：Agent 手上握着的「历史对话」（上下文的核心部分）存放在 <code>Agent</code> 实例的哪个属性上？（提示：看 <code>agent.state.___</code>）</div>
+<input type="text" class="q-input" placeholder="填一个属性名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>3. <code>Agent</code> 类到底是什么角色？</h2>
+
+<p><code>Agent</code>（<code>src/agent.ts</code>）不是循环本身，它是循环外面的一层「有状态外壳」：</p>
+
+<ul>
+<li>持有当前状态：<code>messages</code>、<code>tools</code>、<code>model</code>、<code>isStreaming</code>、<code>streamingMessage</code>、<code>pendingToolCalls</code>……</li>
+<li>把真正的推理-工具循环委托给 <code>runAgentLoop()</code>（定义在 <code>agent-loop.ts</code>，是一个不持有状态的纯函数）</li>
+<li>用一个 <code>processEvents(event)</code> 方法，把循环发出的每个事件<strong>归约（reduce）</strong>成新的状态——这其实是一个 reducer 模式，很像 Redux 的 <code>reducer(state, action) → state</code></li>
+<li>再把事件转发给所有 <code>subscribe()</code> 的监听者，供 UI 更新</li>
+</ul>
+
+<p>换句话说：<strong><code>agent-loop.ts</code> 是引擎，<code>Agent</code> 是仪表盘 + 油箱</strong>。引擎本身不记得任何东西，每次调用都要把当前状态完整传进去（<code>createContextSnapshot()</code>）；仪表盘负责保存状态、暴露给外部读写。</p>
+
+<h2>4. 调用 <code>prompt()</code> 时，事件是怎么流动的？</h2>
+
+<p>这是 <a href="../pi/packages/agent/README.md">官方 README</a> 里给出的事件时序（无工具调用的最简单情况）：</p>
+
+<pre>prompt("Hello")
+├─ agent_start
+├─ turn_start
+├─ message_start   { message: userMessage }
+├─ message_end     { message: userMessage }
+├─ message_start   { message: assistantMessage }
+├─ message_update  { message: partial... }   // 流式增量
+├─ message_update  { message: partial... }
+├─ message_end     { message: assistantMessage }
+├─ turn_end        { message, toolResults: [] }
+└─ agent_end        { messages: [...] }</pre>
+
+<p>如果 assistant 的回复里带了工具调用，流程会在 <code>message_end</code> 之后岔出一段工具执行事件，执行完再回到 <code>turn_end</code>。完整的事件类型定义在 <code>src/types.ts</code> 的 <code>AgentEvent</code>（一个联合类型，一共 9 种事件）。</p>
+
+<div class="quiz" data-answer="tool_execution_start">
+<div class="q-prompt">小测验 2：如果 assistant 消息里包含一次工具调用，紧跟在这条 assistant 消息的 <code>message_end</code> 之后的下一个事件类型是什么？</div>
+<input type="text" class="q-input" placeholder="填事件类型，比如 xxx_yyy">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>5. 小测验：Model 还是 Harness？</h2>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">按 Model–Harness 结构，下面哪一项属于 <strong>Harness</strong>（而不是 Model）？</div>
+<div class="q-options">
+<button class="q-option" data-correct="true">构造上下文暴露工具接口</button>
+<button class="q-option">理解意图生成下一步文本</button>
+<button class="q-option">输出下一词的概率分布值</button>
+<button class="q-option">执行梯度下降更新参数值</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>下一步</h2>
+
+<p>下一课我们会打开 <code>agent-loop.ts</code>，看这个「引擎」内部一轮 turn 具体怎么跑：什么时候调 LLM、什么时候并行执行工具、什么时候决定继续或停下。在那之前，建议你：</p>
+
+<ol>
+<li>通读 <a href="https://bojieli.github.io/ai-agent-book/" target="_blank">《深入理解 AI Agent》第一章</a>剩余部分（工具五分类、观察/动作空间）</li>
+<li>打开 <code>pi/packages/agent/src/types.ts</code>，找到 <code>AgentEvent</code> 的完整定义，数一数一共几种事件</li>
+</ol>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：这节课任何没弄懂的地方——公式、Model–Harness、reducer 模式、事件流——都可以直接问我（你的 AI 老师）。卡住了就问，不用等下一课。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 1 of the pi-agent-core architecture course · <a href="../reference/0001-agent-architecture-overview.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · Turn 循环</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0002-turn-loop.html">← Lesson 2</a> · <a href="0001-agent-architecture-overview.html">参考卡片 1：架构总览</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>Turn 循环：一次 prompt() 内部跑几轮？</h1>
+<p class="subtitle">配套 Lesson 2。可打印，随时回来查。</p>
+
+<h2>骨架 → 代码 对照表</h2>
+<table>
+<tr><th>第一章循环骨架</th><th>agent-loop.ts 实现</th></tr>
+<tr><td><code>actions = Model(Harness.build_context(trajectory))</code></td><td><code>streamAssistantResponse()</code> — 应用 <code>transformContext</code> → <code>convertToLlm</code> → 调 <code>streamFn</code></td></tr>
+<tr><td><code>if len(actions) == 0: break</code></td><td><code>toolCalls.length === 0</code> → <code>hasMoreToolCalls</code> 保持 <code>false</code> → 内层 <code>while</code> 自然退出</td></tr>
+<tr><td><code>allowed_actions = Harness.constrain(actions)</code></td><td><code>beforeToolCall</code> 钩子（可 <code>block</code> 某个工具调用）— 见下一课</td></tr>
+<tr><td><code>observation = Environment.apply(allowed_actions)</code></td><td><code>tool.execute()</code> — 见下一课</td></tr>
+<tr><td><code>if not verify: correct</code></td><td><code>afterToolCall</code> 钩子 + 截断消息的失败处理（<code>failToolCallsFromTruncatedMessage</code>）— 见下一课</td></tr>
+</table>
+
+<h2>两条退出路径</h2>
+<table>
+<tr><th>路径</th><th>触发条件</th><th>谁决定</th></tr>
+<tr><td>自然停下</td><td>assistant 这轮回复不含任何 <code>toolCall</code></td><td>模型自己</td></tr>
+<tr><td>被叫停</td><td><code>shouldStopAfterTurn</code> 返回 <code>true</code></td><td>应用层配置（轮数上限、预算上限等）</td></tr>
+</table>
+<p>两条路径殊途同归：都会 <code>emit({ type: "agent_end", messages: newMessages })</code> 后 <code>return</code>。</p>
+
+<h2><code>turn_end</code> vs <code>agent_end</code></h2>
+<p><code>turn_end</code> = 「一次 LLM 调用 + 它触发的整批工具调用（0~N 个，一起算一轮）跑完了」，<strong>不是</strong>「一次工具调用跑完了」——如果这轮 assistant 消息里有 3 个 <code>toolCall</code>，无论顺序还是并行执行，3 个全部结束才发一次 <code>turn_end</code>。</p>
+<pre>turn_start
+ └─ streamAssistantResponse()   1 次 LLM 调用 → 1 条 assistant 消息
+ └─ executeToolCalls()          这条消息里的全部 toolCall，当一批一起跑完
+turn_end                        整批都结束后才发一次</pre>
+<p><code>agent_end</code> 每次 <code>prompt()</code>/<code>continue()</code> 调用只发一次，<code>turn_end</code> 可以发很多次（模型每多来一轮 LLM 调用就多一个 <code>turn_end</code>）。只有触发停止条件（自然停 / <code>shouldStopAfterTurn</code>）的那一次 <code>turn_end</code>，后面才会紧跟着发 <code>agent_end</code>。关系可以写成：</p>
+<pre>agent_start
+  turn_start → ... → turn_end   ─┐
+  turn_start → ... → turn_end    │ 重复 N 次（N = 这次 prompt() 里 LLM 被调用的次数）
+  ...                            │
+  turn_start → ... → turn_end   ─┘ ← 最后一次，紧跟着触发停止
+agent_end</pre>
+
+<h2>Harness 工程 vs. Loop 工程（别混淆）</h2>
+<table>
+<tr><th></th><th>范围</th><th>本课对应哪个</th></tr>
+<tr><td><strong>Harness 工程</strong></td><td>单次 <code>prompt()</code> 调用内：上下文/工具接口、约束、验证、<strong>反馈循环</strong>、错误恢复</td><td>✓ 这一课讲的 turn 循环就在这一层</td></tr>
+<tr><td><strong>Loop 工程</strong></td><td>跨多次任务、甚至跨会话：谁来找下一件要做的事、何时算真正完成</td><td>✗ 更高一层，暂不涉及</td></tr>
+</table>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>ai-agent-book/book/chapter1.md</code>（循环骨架伪代码、Harness/Loop 工程定义）</li>
+<li><code>pi/packages/agent/src/agent-loop.ts</code>（<code>runLoop</code> 函数，约第 155-275 行）</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 2 · pi-agent-core architecture course</footer>
+
+</body>
+</html>
