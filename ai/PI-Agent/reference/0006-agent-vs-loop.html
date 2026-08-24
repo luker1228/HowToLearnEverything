@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · Agent 类与 agent-loop</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0006-agent-vs-loop.html">← Lesson 6</a> · <a href="0005-context-compaction.html">参考卡片 5：上下文压缩</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</h1>
+<p class="subtitle">配套 Lesson 6。可打印，随时回来查。</p>
+
+<h2>调用链全景</h2>
+<pre>Agent.prompt(text)
+  → runPromptMessages(messages)
+      → createContextSnapshot()          // {systemPrompt, messages, tools} 的浅拷贝
+      → createLoopConfig(options)        // 含 convertToLlm / shouldStopAfterTurn 等回调
+      → runAgentLoop(messages, snapshot, config, emit=processEvents, signal, streamFn)
+          → 引擎内部跑 turn 循环，不断调用 emit(event)
+      → processEvents(event) 逐个折进 this._state
+      → 广播给 subscribe() 的所有监听者</pre>
+<p>位置：<code>agent.ts:409-423</code>（<code>runPromptMessages</code>）、<code>437-443</code>（快照）、<code>agent-loop.ts:95-102</code>（<code>runAgentLoop</code> 签名）。</p>
+
+<h2>快照：引擎只看数据,不拿 Agent 引用</h2>
+<pre>private createContextSnapshot(): AgentContext {
+	return {
+		systemPrompt: this._state.systemPrompt,
+		messages: this._state.messages.slice(),   // 浅拷贝
+		tools: this._state.tools.slice(),
+	};
+}</pre>
+<p><code>runAgentLoop</code> 只接收这个普通对象 + <code>emit</code> 回调，从不持有 <code>Agent</code> 实例——这就是"纯函数式引擎"的字面含义。</p>
+
+<h2><code>processEvents</code>：字面意义上的 reducer</h2>
+<table>
+<tr><th>事件</th><th>状态变化</th></tr>
+<tr><td><code>message_start</code> / <code>message_update</code></td><td><code>streamingMessage = event.message</code>（半成品，不进 <code>messages</code>）</td></tr>
+<tr><td><code>message_end</code></td><td><code>streamingMessage = undefined</code>；<code>messages.push(event.message)</code>（这一刻才真正落地）</td></tr>
+<tr><td><code>tool_execution_start</code>/<code>_end</code></td><td>新建一个 <code>Set</code> 增删 <code>pendingToolCalls</code>（不可变更新，不原地改）</td></tr>
+<tr><td><code>turn_end</code></td><td>仅当 <code>message.role === "assistant" &amp;&amp; message.errorMessage</code> 时写 <code>errorMessage</code></td></tr>
+<tr><td><code>agent_end</code></td><td><code>streamingMessage = undefined</code></td></tr>
+<tr><td><code>agent_start</code> / <code>turn_start</code></td><td>无对应 case——纯通知，不改状态</td></tr>
+</table>
+<p>位置：<code>agent.ts:544-591</code>。</p>
+
+<h2>顺序：先更新状态，再广播监听者</h2>
+<pre>// processEvents 末尾（agent.ts:584-590）
+for (const listener of this.listeners) {
+	await listener(event, signal);
+}</pre>
+<p>switch 分支跑完（状态已更新）之后才广播——监听者收到事件时 <code>agent.state</code> 已经是最新值，不会有竞态。<code>subscribe()</code>（<code>agent.ts:250-253</code>）注册监听者，返回取消订阅函数。</p>
+
+<h2>为什么拆两层</h2>
+<table>
+<tr><th>好处</th><th>证据</th></tr>
+<tr><td>引擎可脱离 Agent 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code> + mock <code>emit</code>，不需要构造 <code>Agent</code></td></tr>
+<tr><td>纯逻辑可在无常驻 Agent 场景复用</td><td>Lesson 5：<code>harness/compaction/</code> 复用 <code>convertToLlm</code>，同一种"剥离可复用纯逻辑"的取向</td></tr>
+<tr><td>状态更新路径单一</td><td>所有状态变化只经过 <code>processEvents</code> 这一个 switch，没有旁路</td></tr>
+</table>
+<p>类注释（<code>agent.ts:167-171</code>）：「Stateful wrapper around the low-level agent loop. <code>Agent</code> owns the current transcript, emits lifecycle events, executes tools, and exposes queueing APIs...」</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/agent/src/agent.ts</code>：<code>defaultConvertToLlm:33-37</code>、类注释<code>:167-171</code>、<code>runPromptMessages:409-423</code>、<code>createContextSnapshot:437-443</code>、<code>processEvents:544-591</code>、<code>subscribe:250-253</code></li>
+<li><code>pi/packages/agent/src/agent-loop.ts</code>：<code>runAgentLoop</code> 签名 <code>:95-102</code></li>
+<li><code>pi/packages/agent/src/types.ts</code>：<code>AgentState:333-358</code></li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 6 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 4 · 上下文管道：AgentMessage → Message</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0003-tool-call-lifecycle.html">← Lesson 3</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0004-context-pipeline.html">参考卡片：上下文管道 →</a></div>
+
+<p class="kicker">Lesson 4 · pi-agent-core</p>
+<h1>上下文管道：AgentMessage → Message</h1>
+<p class="subtitle">目标：打开 Lesson 1 表格里「眼睛」那一格故意留下的悬念——<code>messages</code> 前面「一条处理管线把 App 消息转成 LLM 消息」，到底是哪条管线、为什么需要它。</p>
+
+<div class="quiz" data-answer="app消息转成llm消息;app消息变成llm消息;把app消息转成llm消息;把agentmessage转成message">
+<div class="q-prompt">热身回忆：Lesson 1 的表格里提到，<code>messages</code> 外面还包着「一条处理管线」。这条管线一句话概括，是把什么转成什么？</div>
+<input type="text" class="q-input" placeholder="填一句话">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>1. 书里的前提：API 无状态，每次都要重建上下文</h2>
+
+<p>《深入理解 AI Agent》第一章说得很直接：</p>
+
+<blockquote>由于模型 API 本身是无状态的，每次调用时都必须由 Agent 框架重新构造足够的上下文。</blockquote>
+
+<p>第二章讨论上下文压缩时，进一步点出这件「重新构造」发生的<strong>时机</strong>：</p>
+
+<blockquote>压缩不是在单次 API 调用的过程中修改上下文，而是在<strong>两次 API 调用之间</strong>，由 Agent 框架对消息列表进行预处理。</blockquote>
+
+<p>这两句话合起来，正好是这节课要打开的黑箱：pi-agent-core 里，「两次 API 调用之间，重新构造上下文」具体拆成了哪两步。</p>
+
+<h2>2. 代码对照：一条两级管道</h2>
+
+<p>官方 README 用一行图总结了这条管道（<code>pi/packages/agent/README.md:58-63</code>）：</p>
+
+<pre>AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → Message[] → LLM
+                    (optional)                           (required)</pre>
+
+<p>对应到 <code>agent-loop.ts</code> 的 <code>streamAssistantResponse</code> 函数（每次 LLM 调用前都会跑一次）：</p>
+
+<pre>let messages = context.messages;
+if (config.transformContext) {
+    messages = await config.transformContext(messages, signal);
+}
+const llmMessages = await config.convertToLlm(messages);</pre>
+
+<table>
+<tr><th>步骤</th><th>类型变化</th><th>是否必须</th><th>典型用途</th></tr>
+<tr><td><code>transformContext</code></td><td><code>AgentMessage[]</code> → <code>AgentMessage[]</code>（形状不变）</td><td>可选，不传就跳过</td><td>裁剪旧消息（上下文窗口管理）、注入外部上下文</td></tr>
+<tr><td><code>convertToLlm</code></td><td><code>AgentMessage[]</code> → <code>Message[]</code>（收窄类型）</td><td>必须，<code>AgentLoopConfig</code> 的必填字段</td><td>过滤 UI 专用消息、把自定义类型渲染成 LLM 能懂的文本</td></tr>
+</table>
+
+<p>注意这两步<strong>每次 LLM 调用都会重新跑一遍</strong>，不是整场对话只跑一次——这正好呼应上面第一章那句话：模型是无状态的，上下文要「每次调用」重建。</p>
+
+<h2>3. 为什么需要两种消息：AgentMessage vs LLM Message</h2>
+
+<p>README 有一节专门讲这个区分（<code>README.md:47-53</code>）：</p>
+
+<blockquote>The agent works with <code>AgentMessage</code>, a flexible type that can include standard LLM messages (<code>user</code>/<code>assistant</code>/<code>toolResult</code>) and custom app-specific message types via declaration merging. LLMs only understand <code>user</code>、<code>assistant</code>、<code>toolResult</code>。</blockquote>
+
+<p>代码里这个类型只有一行（<code>types.ts:325</code>）：</p>
+
+<pre>export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];</pre>
+
+<p><code>Message</code> 来自 <code>@earendil-works/pi-ai</code>——是 LLM API 真正认识的三种角色。<code>CustomAgentMessages</code> 默认是个空接口，靠 TypeScript 的<strong>声明合并（declaration merging）</strong>让每个 App 往里加自己的类型。<code>harness/messages.ts</code> 就是这么加的（<code>messages.ts:54-61</code>）：</p>
+
+<pre>declare module "../types.ts" {
+  interface CustomAgentMessages {
+    bashExecution: BashExecutionMessage;
+    custom: CustomMessage;
+    branchSummary: BranchSummaryMessage;
+    compactionSummary: CompactionSummaryMessage;
+  }
+}</pre>
+
+<p>换句话说：<strong>App/Harness 层需要记住的东西，比 LLM API 能读懂的东西多得多</strong>——一次 bash 命令的完整执行记录（给 UI 展示用）、一条压缩摘要标记、一条分支总结——这些在对话轨迹里都是「真实发生过的事」，但没有一个是 LLM API 认识的角色。<code>AgentMessage</code> 就是「App 记住的完整轨迹」，<code>Message</code> 才是「喂给模型这一口能消化的东西」——两者不是一回事，所以中间必须有一层翻译。</p>
+
+<div class="quiz" data-answer="user;assistant;toolresult;user、assistant、toolresult">
+<div class="q-prompt">小测验 1：<code>Message</code>（LLM 真正认识的类型）一共只有哪几种角色？</div>
+<input type="text" class="q-input" placeholder="填角色名，用、分隔">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>4. <code>convertToLlm</code> 不止一个版本——它是契约，不是写死的逻辑</h2>
+
+<p>这是这节课最容易被忽略、但很值得注意的一点：<code>convertToLlm</code> 在代码库里至少有<strong>两种不同实现</strong>，行为并不一样。</p>
+
+<table>
+<tr><th>实现</th><th>位置</th><th>遇到 <code>bashExecution</code> 这类自定义消息怎么办</th></tr>
+<tr><td><strong>粗暴版</strong>（<code>Agent</code> 类的兜底默认值）</td><td><code>agent.ts:33-37</code> <code>defaultConvertToLlm</code></td><td>直接过滤掉——非 <code>user</code>/<code>assistant</code>/<code>toolResult</code> 一律丢弃，不做任何转换</td></tr>
+<tr><td><strong>负责版</strong>（harness 提供的现成实现）</td><td><code>harness/messages.ts:124-168</code> <code>convertToLlm</code></td><td>渲染成文字——<code>bashExecution</code> 变成一条描述执行结果的 <code>user</code> 消息，<code>compactionSummary</code>/<code>branchSummary</code> 包一层 <code>&lt;summary&gt;</code> 标记后也变成 <code>user</code> 消息</td></tr>
+</table>
+
+<p>两者都符合同一个契约（<code>types.ts:159-160</code>）：<strong>不能抛错，遇到处理不了的类型必须给一个安全兜底</strong>（通常就是过滤掉），因为「抛错会打断整个循环、发不出正常的事件序列」。至于具体怎么翻译、翻译成什么样，完全由传进来的那个函数决定——<code>AgentLoopConfig.convertToLlm</code> 就是留给每个 App 自己填的一个洞。这正是「区分 AgentMessage 和 Message」换来的好处：核心引擎（<code>agent-loop.ts</code>）永远不需要知道 <code>bashExecution</code> 是什么，它只认「你给我一个能把任意 <code>AgentMessage[]</code> 变成合法 <code>Message[]</code> 的函数」。</p>
+
+<h2>5. 用测试钉死执行顺序</h2>
+
+<p><code>agent/test/agent-loop.test.ts:221-272</code> 有一个测试专门验证「先 <code>transformContext</code> 再 <code>convertToLlm</code>」这个顺序：<code>transformContext</code> 把 4 条历史消息裁剪成 2 条（<code>messages.slice(-2)</code>），断言 <code>convertToLlm</code> 收到的就是这裁剪后的 2 条，而不是原始的 4 条。这证明 <code>transformContext</code> 的输出直接是 <code>convertToLlm</code> 的输入——管道是严格串行、单向收窄的，没有反过来的通道。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">如果 <code>transformContext</code> 把 10 条 <code>AgentMessage</code> 裁剪成 3 条，<code>convertToLlm</code> 收到的输入是几条？</div>
+<div class="q-options">
+<button class="q-option">10 条，transformContext 只是预览不影响真实输入</button>
+<button class="q-option" data-correct="true">3 条，convertToLlm 只看得到裁剪之后的结果</button>
+<button class="q-option">13 条，两次结果会被拼在一起</button>
+<button class="q-option">0 条，裁剪之后管道直接跳过 convertToLlm</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>下一步的彩蛋预告</h2>
+
+<p><code>harness/compaction/</code> 里的压缩逻辑（<code>compaction.ts:549</code>、<code>809</code>）内部也调用了 <code>convertToLlm</code>——用途不是喂给主循环的 LLM 调用，而是把一段历史先转成 <code>Message[]</code>，再单独发一次 LLM 请求「总结这段历史」，总结完再包成一条 <code>compactionSummary</code> 类型的 <code>AgentMessage</code> 塞回轨迹。这正好是第二章那句话的具体实现：<strong>压缩发生在两次 API 调用之间</strong>，而不是某次调用内部——下一课我们会打开 <code>harness/compaction/</code> 看这套机制。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<a href="../pi/packages/agent/README.md">pi-agent-core README</a> 的「AgentMessage vs LLM Message」「Message Flow」两节（<code>README.md:47-63</code>），以及《深入理解 AI Agent》第二章「上下文压缩策略」一节（<code>ai-agent-book/book/chapter2.md</code> 第 1000-1010 行附近，「压缩与 KV Cache：看似矛盾，实则互补」）。建议正式学习前通读一遍这两处。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：AgentMessage 和 Message 的区分、declaration merging、convertToLlm 的多个版本——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 4 of the pi-agent-core architecture course · <a href="../reference/0004-context-pipeline.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

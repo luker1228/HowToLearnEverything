@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · 上下文管道</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0004-context-pipeline.html">← Lesson 4</a> · <a href="0003-tool-call-lifecycle.html">参考卡片 3：工具调用生命周期</a> · <a href="0005-context-compaction.html">参考卡片 5：上下文压缩 →</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>上下文管道：AgentMessage → Message</h1>
+<p class="subtitle">配套 Lesson 4。可打印，随时回来查。</p>
+
+<h2>管道全景</h2>
+<pre>AgentMessage[] → transformContext() → AgentMessage[] → convertToLlm() → Message[] → LLM
+                    (可选)                                (必须)</pre>
+<table>
+<tr><th>步骤</th><th>类型变化</th><th>是否必须</th><th>典型用途</th></tr>
+<tr><td><code>transformContext</code></td><td>AgentMessage[] → AgentMessage[]</td><td>可选</td><td>裁剪旧消息、注入外部上下文</td></tr>
+<tr><td><code>convertToLlm</code></td><td>AgentMessage[] → Message[]</td><td>必须</td><td>过滤 UI 专用消息、渲染自定义类型</td></tr>
+</table>
+<p>每次 LLM 调用（每个 turn）都重新跑一遍这两步——不是整场对话只跑一次。位置：<code>agent-loop.ts</code> 的 <code>streamAssistantResponse</code>。</p>
+
+<h2>为什么要分两种消息</h2>
+<table>
+<tr><th></th><th>是什么</th><th>LLM 认识吗</th></tr>
+<tr><td><code>Message</code></td><td>来自 <code>@earendil-works/pi-ai</code>，只有 <code>user</code>/<code>assistant</code>/<code>toolResult</code> 三种角色</td><td>✓ 唯一认识的格式</td></tr>
+<tr><td><code>AgentMessage</code></td><td><code>Message | CustomAgentMessages[keyof CustomAgentMessages]</code>——靠声明合并加自定义类型（<code>bashExecution</code>/<code>custom</code>/<code>branchSummary</code>/<code>compactionSummary</code>……）</td><td>✗ 只是 App/Harness 自己记的完整轨迹</td></tr>
+</table>
+<p><strong>AgentMessage = App 记住的一切；Message = 喂给模型这一口能消化的东西。</strong>两者不是一回事，所以中间必须有翻译层。</p>
+
+<div class="callout">
+<p><strong>常见误解：role 里没有 <code>"system"</code></strong>。系统提示词不是一条消息，是 <code>Context</code> 接口上单独的字符串字段 <code>systemPrompt</code>（<code>packages/ai/src/types.ts:521-522</code>），跟 <code>messages</code> 数组并列，不参与 role 枚举。对应第二章「静态前缀 + 轨迹」结构——systemPrompt 和工具定义是不变的静态前缀，<code>messages</code> 才是随交互增长的轨迹。见 <a href="../learning-records/0004-message-roles-no-system-role.md">学习记录 0004</a>。</p>
+</div>
+
+<div class="callout">
+<p><strong>常见误解：应该让 <code>Message</code>（LLM 消息）贯穿始终，不需要 <code>AgentMessage</code></strong>。反例：<code>!!command</code> 这种双感叹号 bash 命令（<code>coding-agent/src/core/messages.ts:29-40</code>）：</p>
+<pre>interface BashExecutionMessage {
+  role: "bashExecution";
+  exitCode: number | undefined;
+  cancelled: boolean;
+  truncated: boolean;
+  excludeFromContext?: boolean;  // !! 前缀设的就是这个
+}</pre>
+<p><code>excludeFromContext</code> 在概念上与 <code>Message</code> 自相矛盾：<code>UserMessage</code> 的语义就是「即将发给 LLM 的一条消息」，没法在这个类型上表达「这条消息发生过，但别发给模型」。<code>convertToLlm</code> 里 <code>excludeFromContext</code> 为真时直接 <code>return undefined</code>——消息留在 <code>AgentMessage[]</code> 轨迹里（UI 能看到完整执行记录），但从未进入过任何一次 LLM 请求。准确的说法应该反过来：<strong><code>AgentMessage</code> 才是贯穿始终的那条轨迹，<code>Message</code> 只是每次发请求前用 <code>convertToLlm</code> 现算出来的临时子集</strong>。见 <a href="../learning-records/0005-agentmessage-not-message-throughout.md">学习记录 0005</a>。</p>
+</div>
+
+<h2><code>convertToLlm</code> 不止一个版本</h2>
+<table>
+<tr><th>实现</th><th>位置</th><th>遇到自定义消息类型怎么办</th></tr>
+<tr><td>粗暴版（<code>Agent</code> 类默认值）</td><td><code>agent.ts</code> <code>defaultConvertToLlm</code></td><td>直接丢弃</td></tr>
+<tr><td>负责版（harness 现成实现）</td><td><code>harness/messages.ts</code> <code>convertToLlm</code></td><td>渲染成文字（如 <code>bashExecution</code> → 描述性 user 消息）</td></tr>
+</table>
+<p>共同契约：<strong>不能抛错</strong>，处理不了就给安全兜底（一般是过滤掉）。具体怎么翻译由传入的函数决定——<code>convertToLlm</code> 是 <code>AgentLoopConfig</code> 里一个可插拔契约，不是写死的逻辑。</p>
+
+<h2>执行顺序是严格串行、单向收窄的</h2>
+<p><code>test/agent-loop.test.ts:221-272</code>：<code>transformContext</code> 把 4 条消息裁成 2 条，<code>convertToLlm</code> 收到的输入就是这 2 条——不会看到裁剪前的原始消息，也不会有反向通道。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/agent/README.md</code> 第 47-63 行（AgentMessage vs LLM Message、Message Flow）</li>
+<li><code>ai-agent-book/book/chapter2.md</code>「压缩与 KV Cache：看似矛盾，实则互补」一节（压缩发生在两次 API 调用之间）</li>
+<li><code>pi/packages/agent/src/types.ts:325</code>（<code>AgentMessage</code> 类型定义）、<code>src/harness/messages.ts:54-168</code>（声明合并 + 负责版 <code>convertToLlm</code>）</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 4 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 6 · Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0005-context-compaction.html">← Lesson 5</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0006-agent-vs-loop.html">参考卡片：Agent 与 agent-loop →</a></div>
+
+<p class="kicker">Lesson 6 · pi-agent-core</p>
+<h1>Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</h1>
+<p class="subtitle">兑现 Lesson 5 结尾的彩蛋：Lesson 1 说过 <code>Agent</code> 是"仪表盘+油箱"、<code>agent-loop.ts</code> 是不持有状态的"引擎"——这节课打开这条边界，看仪表盘具体是怎么把引擎吐出来的事件，"折"成自己的状态的。</p>
+
+<div class="quiz" data-answer="processEvents;reducer">
+<div class="q-prompt">热身回忆：Lesson 1 说 <code>Agent</code> 类用一个方法把循环发出的每个事件"归约（reduce）"成新的状态，很像 Redux 的 reducer。这个方法叫什么？</div>
+<input type="text" class="q-input" placeholder="填方法名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>1. 引擎不认识"状态"这个词——它只认"快照"</h2>
+
+<p><code>runAgentLoop</code>（<code>agent-loop.ts:95-102</code>）的签名是这样的：</p>
+
+<pre>export async function runAgentLoop(
+	prompts: AgentMessage[],
+	context: AgentContext,       // 只有 systemPrompt / messages / tools 三个字段的快照
+	config: AgentLoopConfig,
+	emit: AgentEventSink,        // 事件发生时调这个回调，别的什么都不管
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
+): Promise&lt;AgentMessage[]&gt;</pre>
+
+<p>注意它不接收 <code>Agent</code> 实例，只接收一个 <strong>普通数据对象</strong>（<code>AgentContext</code>）——这正是"纯函数式"的字面含义：给定同样的输入（<code>prompts</code>、<code>context</code>、<code>config</code>），跑出来的事件序列应该是确定的，跟"这是不是同一个 <code>Agent</code> 实例、之前跑过多少次"完全无关。</p>
+
+<p>这个快照由 <code>Agent</code> 私有方法 <code>createContextSnapshot()</code> 现场生成（<code>agent.ts:437-443</code>）：</p>
+
+<pre>private createContextSnapshot(): AgentContext {
+	return {
+		systemPrompt: this._state.systemPrompt,
+		messages: this._state.messages.slice(),   // 浅拷贝，不是原数组引用
+		tools: this._state.tools.slice(),
+	};
+}</pre>
+
+<p><code>.slice()</code> 是关键细节：引擎拿到的是当前状态的一份拷贝，而不是指向 <code>Agent</code> 内部数组的引用。引擎跑的过程中即使想改，也改不到 <code>Agent</code> 真正的状态——它唯一能"通知"外部发生了什么的方式，是调用 <code>emit</code>。</p>
+
+<h2>2. <code>prompt()</code> 调用链：仪表盘怎么把快照和回调交给引擎</h2>
+
+<p><code>Agent.prompt()</code> 最终落到 <code>runPromptMessages</code>（<code>agent.ts:409-423</code>）：</p>
+
+<pre>private async runPromptMessages(messages: AgentMessage[], options = {}): Promise&lt;void&gt; {
+	await this.runWithLifecycle(async (signal) => {
+		await runAgentLoop(
+			messages,
+			this.createContextSnapshot(),          // ① 现做一份快照
+			this.createLoopConfig(options),         // ② 把配置（包括 convertToLlm）打包
+			(event) => this.processEvents(event),   // ③ 把 reducer 方法当回调传进去
+			signal,
+			this.streamFunction,
+		);
+	});
+}</pre>
+
+<p>三行注释对应三件事：引擎需要「看到什么」（快照）、「能用什么规则处理消息/停止」（config）、「发生事情时该喊谁」（<code>emit</code> 回调）。<code>Agent</code> 类把这三样准备好，剩下的全部丢给引擎去跑——这也是为什么 <code>runAgentLoop</code> 可以在完全没有 <code>Agent</code> 实例的场景下被单独测试（<code>agent-loop.test.ts</code> 直接 mock 一个 <code>emit</code> 函数，不需要构造一个 <code>Agent</code>）。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt"><code>createContextSnapshot()</code> 里 <code>messages: this._state.messages.slice()</code> 用了 <code>.slice()</code> 而不是直接 <code>this._state.messages</code>。如果去掉 <code>.slice()</code>，最可能出什么问题？</div>
+<div class="q-options">
+<button class="q-option">类型报错，TypeScript 不允许这样写</button>
+<button class="q-option" data-correct="true">引擎和 Agent 状态会共享同一个数组引用，理论上引擎内部的任何数组操作都可能直接污染 Agent 的真实状态，破坏"引擎不持有/不改动外部状态"的假设</button>
+<button class="q-option">程序会立刻崩溃</button>
+<button class="q-option">没有区别，因为数组在 JS 里本来就是值传递</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>3. <code>processEvents</code>：逐个事件类型的 switch，就是字面意义上的 reducer</h2>
+
+<p><code>agent.ts:544-591</code>，完整贴出来看比想象中还朴素：</p>
+
+<pre>private async processEvents(event: AgentEvent): Promise&lt;void&gt; {
+	switch (event.type) {
+		case "message_start":
+			this._state.streamingMessage = event.message;
+			break;
+		case "message_update":
+			this._state.streamingMessage = event.message;
+			break;
+		case "message_end":
+			this._state.streamingMessage = undefined;
+			this._state.messages.push(event.message);     // 流式结束才真正落进 messages
+			break;
+		case "tool_execution_start": {
+			const pendingToolCalls = new Set(this._state.pendingToolCalls);
+			pendingToolCalls.add(event.toolCallId);
+			this._state.pendingToolCalls = pendingToolCalls;
+			break;
+		}
+		case "tool_execution_end": {
+			const pendingToolCalls = new Set(this._state.pendingToolCalls);
+			pendingToolCalls.delete(event.toolCallId);
+			this._state.pendingToolCalls = pendingToolCalls;
+			break;
+		}
+		case "turn_end":
+			if (event.message.role === "assistant" && event.message.errorMessage) {
+				this._state.errorMessage = event.message.errorMessage;
+			}
+			break;
+		case "agent_end":
+			this._state.streamingMessage = undefined;
+			break;
+	}
+	// ...处理完之后，才转发给所有 subscribe() 的监听者（见下一节）
+}</pre>
+
+<p>几个值得注意的细节：</p>
+<ul>
+<li><strong><code>message_start</code>/<code>message_update</code> 只更新 <code>streamingMessage</code>，不动 <code>messages</code></strong>——一条 assistant 消息在流式生成的过程中，UI 看到的是 <code>state.streamingMessage</code> 这个"半成品"，只有 <code>message_end</code> 那一刻才真正 <code>push</code> 进正式的 <code>messages</code> 数组。这解释了为什么 <code>AgentState</code>（<code>types.ts:333-358</code>）要把 <code>streamingMessage</code> 和 <code>messages</code> 设计成两个独立字段——一个是"正在发生"，一个是"已经发生"。</li>
+<li><strong><code>pendingToolCalls</code> 每次都新建一个 <code>Set</code></strong>，不是原地 <code>.add()</code>/<code>.delete()</code>——这是不可变更新的写法（immutable update），常见于需要让外部监听者用「引用是否变化」判断"有没有更新"的场景（比如 React 的 <code>useState</code> 心智模型）。</li>
+<li><strong>没有对应的 <code>case</code> 就什么都不做</strong>——比如 <code>agent_start</code>、<code>turn_start</code> 这两种事件（Lesson 1 事件时序里出现过）在这个 switch 里没有分支，说明它们纯粹是"通知"，不改变 <code>Agent</code> 的任何状态字段。</li>
+</ul>
+
+<h2>4. 事件先"折"进状态，再广播给监听者——顺序不能反</h2>
+
+<p><code>processEvents</code> 最后几行（<code>agent.ts:584-590</code>）：</p>
+
+<pre>const signal = this.activeRun?.abortController.signal;
+for (const listener of this.listeners) {
+	await listener(event, signal);
+}</pre>
+
+<p>配合 <code>subscribe()</code>（<code>agent.ts:250-253</code>）：</p>
+
+<pre>subscribe(listener: (event: AgentEvent, signal: AbortSignal) => Promise&lt;void&gt; | void): () => void {
+	this.listeners.add(listener);
+	return () => this.listeners.delete(listener);   // 返回一个取消订阅函数
+}</pre>
+
+<p>关键顺序：<strong>switch 分支（状态更新）先跑完，for 循环（广播给监听者）后跑</strong>。这意味着 UI 层的监听者收到某个事件时，<code>agent.state</code> 已经是更新之后的最新值——不会出现"UI 拿到 <code>message_end</code> 事件，但 <code>state.messages</code> 里还没有这条消息"的竞态。</p>
+
+<div class="quiz" data-answer="turn_end;agent_end">
+<div class="q-prompt">小测验：<code>turn_end</code> 事件里，<code>processEvents</code> 只在一种情况下才会写 <code>this._state.errorMessage</code>——是什么情况？（提示：看 message 的 role 和某个字段）</div>
+<input type="text" class="q-input" placeholder="填条件描述里出现的事件类型或字段名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>5. 为什么要拆成两层，而不是让 <code>Agent</code> 自己把逻辑写在方法里？</h2>
+
+<p><code>Agent</code> 类头上的注释写得很直接（<code>agent.ts:167-171</code>）：</p>
+
+<blockquote>Stateful wrapper around the low-level agent loop.<br>
+<code>Agent</code> owns the current transcript, emits lifecycle events, executes tools, and exposes queueing APIs for steering and follow-up messages.</blockquote>
+
+<p>代码库本身没有写"为什么"的长篇论证，但从代码结构能反推出三个实际好处：</p>
+
+<table>
+<tr><th>好处</th><th>证据</th></tr>
+<tr><td>引擎可以脱离 <code>Agent</code> 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code>，传一个 mock 的 <code>emit</code> 函数断言事件序列，完全不需要构造一个 <code>Agent</code> 实例</td></tr>
+<tr><td>引擎可以在"没有常驻 <code>Agent</code>"的场景里被复用</td><td>Lesson 5 见过：<code>harness/compaction/</code> 生成摘要时复用的是 <code>convertToLlm</code>（同一层的另一个可复用函数），体现的是同一种设计取向——把可复用的纯逻辑从有状态的外壳里剥离出来</td></tr>
+<tr><td>状态更新路径单一、可预测</td><td>所有状态变化只能通过 <code>processEvents</code> 这一个 switch 发生——不存在"某个方法直接改 <code>this._state.messages</code>"的旁路，调试时只需要盯住一个函数</td></tr>
+</table>
+
+<h2>下一步的彩蛋预告</h2>
+
+<p>这节课看到 <code>Agent</code> 怎么"接住"引擎吐出来的事件，但还没看引擎内部<strong>怎么决定要不要执行工具、并行还是顺序执行</strong>——这是 Lesson 2 结尾故意跳过、留到现在还没细讲的部分，对应书里骨架的 <code>constrain</code>/<code>verify</code>/<code>correct</code> 三步。下一课我们打开 <code>harness/tools/</code>，看 <code>beforeToolCall</code>/<code>afterToolCall</code> 钩子和并行执行策略的实现。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/agent/src/agent.ts</code>（<code>defaultConvertToLlm:33-37</code>、类注释与私有字段<code>:160-175</code>、<code>runPromptMessages:409-423</code>、<code>createContextSnapshot:437-443</code>、<code>processEvents:544-591</code>、<code>subscribe:250-253</code>），<code>pi/packages/agent/src/agent-loop.ts</code>（<code>runAgentLoop</code> 签名 <code>:95-102</code>）。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：快照与引用拷贝、reducer 的顺序、为什么要拆两层——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 6 of the pi-agent-core architecture course · <a href="../reference/0006-agent-vs-loop.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
