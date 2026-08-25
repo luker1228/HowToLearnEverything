@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 10 · Session：多次 run 怎么串成一棵树</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0009-skill-progressive-loading.html">← Lesson 9</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0010-session-tree.html">参考卡片：Session 树 →</a></div>
+
+<p class="kicker">Lesson 10 · coding-agent</p>
+<h1>Session：多次 run 怎么串成一棵树</h1>
+<p class="subtitle">Lesson 6-9 一直在讲"一次 <code>prompt()</code> 调用"（也就是聊天里说的 run/trace）内部怎么跑。但一个长任务往往要来回好几条消息才能完成——这些 run 总要被存下来、串起来，还得支持"退回某一步重新说"。这节课打开这层存储结构。</p>
+
+<h2>1. 问题：只存一条线够不够？</h2>
+
+<p>如果长任务的对话历史只是"消息一条接一条 append 到一个列表里"，会有个具体麻烦：你说错了一句、或者想换个方向重新问，唯一的选择是接着往后说，没法"回到那条消息之前，换一种问法"。真正做到"回退重来"，存储结构就不能是一条线——得能在某个历史节点上分岔出第二条路径，原来那条还留着。这节课看 <code>pi</code> 实际怎么落地这件事。</p>
+
+<h2>2. 每条消息只认自己的父节点，不认"这是第几次 run"</h2>
+
+<p><code>coding-agent</code> 里一条持久化消息的基础形状（<code>core/session-manager.ts:46-51</code>）：</p>
+
+<pre>export interface SessionEntryBase {
+	type: string;
+	id: string;
+	parentId: string | null;   // 只指向"我的上一条"，不知道自己属于哪次 run
+	timestamp: string;
+}</pre>
+
+<p>注意没有类似 <code>runId</code> 的字段。也就是说，"这些消息属于同一次 run"这件事，<strong>在存储层根本没有被显式标记</strong>——它是从消息序列里"上一条 assistant 消息结束后，下一条 <code>role === "user"</code> 的消息标志着新的一次 run 开始"这个规律里推出来的一个概念，不是持久化数据自带的字段。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>pi-agent-core</code> 的类型定义里，有没有专门给"一次 run"分配一个 ID、单独记录"这次 run 什么时候开始/结束"的机制？</div>
+<div class="q-options">
+<button class="q-option">完全没有，从设计上就认为不需要</button>
+<button class="q-option" data-correct="true">有——<code>packages/agent/src/harness/session/types.ts</code> 里定义了 <code>OperationStartedRecord</code>/<code>OperationFinishedRecord</code>（带 <code>runId</code>，<code>intent.kind</code> 分 "run"/"compaction"/"navigation" 三种），但这套设计目前<strong>没有被 <code>coding-agent</code> 真正接上</strong>——整个 <code>coding-agent/src/</code> 搜不到一次对它的调用</button>
+<button class="q-option">有，但只在 SQLite 后端生效，JSONL 后端不支持</button>
+<button class="q-option">有，而且是模型自己决定什么时候产生一次新的 runId</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<p>这跟 Lesson 9 遇到的情况是同一个模式：<code>packages/agent</code> 的 <code>harness/</code> 目录里，有些东西是"设计好了、类型定义齐全、甚至有单测（<code>reducer.test.ts</code>）"，但产品层 <code>coding-agent</code> 还没接上——所以"一次 run 有没有专属 ID"这个问题，标准答案得看你问的是哪一层。这节课接下来讲的都是<strong>真正在用的那一层</strong>：<code>coding-agent</code> 自己的 <code>SessionEntry</code>/<code>SessionManager</code>（<code>core/session-manager.ts</code>），不是 <code>packages/agent</code> 里那套暂时用不上的 <code>Record</code> 系统。</p>
+
+<h2>3. 树是怎么长出来的：父指针 + 分组</h2>
+
+<p>每条 <code>SessionEntry</code> 只存一个 <code>parentId</code>，读回来的时候按父指针分组成一棵树（<code>core/session-manager.ts:159-165</code>）：</p>
+
+<pre>export interface SessionTreeNode {
+	entry: SessionEntry;
+	children: SessionTreeNode[];   // 同一个 parentId 的多条 entry，就是多个分支
+	label?: string;
+	labelTimestamp?: string;
+}</pre>
+
+<p>这跟 git 的 commit 图是同一个数据结构套路：每个节点只记"我的上一个是谁"，一个节点有多个"孩子"就意味着从那一点分出了不止一条路径。正常情况下（没人回退重来）每个节点只有一个孩子，整棵树退化成一条线；一旦发生分叉，才会看出"树"这个结构真正派上用场。</p>
+
+<h2>4. 分叉具体怎么触发：不是"树里加一个节点"，是开一个新的会话文件</h2>
+
+<p>用户层面的入口是 <code>/clone</code> 命令，或者在消息列表里选中一条历史消息回退编辑——两者最终都落到 <code>fork(entryId, options)</code>（<code>agent-session-runtime.ts:262-338</code>）。两种 <code>position</code> 参数对应两种真实场景：</p>
+
+<table>
+<tr><th><code>position</code></th><th>场景</th><th>行为</th></tr>
+<tr><td><code>"at"</code></td><td><code>/clone</code>：复制当前整个会话</td><td><code>targetLeafId = selectedEntry.id</code>——原地分叉，新会话从当前最后一条消息继续</td></tr>
+<tr><td><code>"before"</code>（默认）</td><td>选中一条<strong>用户消息</strong>，想回到它之前重新说</td><td><code>targetLeafId = selectedEntry.parentId</code>，并把这条消息原文取出来（<code>extractUserMessageText</code>）塞回输入框——你编辑后重新发送，等于从那个分叉点长出一条新分支</td></tr>
+</table>
+
+<p>关键细节（<code>agent-session-runtime.ts:288-298</code>）：分叉<strong>不是</strong>在同一个文件里给树加一个节点，是真的调用 <code>sessionManager.createBranchedSession(targetLeafId)</code> 开一个<strong>新的会话文件</strong>，这个新文件记着自己的父会话是谁。也就是说，"一棵树"在磁盘上的真实形态，是一组互相记着"父会话是谁"的独立会话文件家族，不是单个文件内部的多分支树——这点跟 <code>packages/agent</code> 那套（未采用的）<code>SessionTree</code> 抽象里"一个 tree 存多个 branch"的设想不完全一样。</p>
+
+<div class="quiz" data-answer="parentId">
+<div class="q-prompt">小测验：<code>position: "before"</code> 分叉时，新分支的起点 <code>targetLeafId</code> 取的是被选中那条用户消息的哪个字段？</div>
+<input type="text" class="q-input" placeholder="填字段名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>回答你的问题</h2>
+
+<p>"完成一个长任务要对话多次"，对应的是一个 <strong>Session</strong>——由一串 <code>SessionEntry</code>（靠 <code>parentId</code> 互相指认）组成，正常情况下退化成一条线，每次用户发消息触发的一次完整 <code>runAgentLoop</code> 执行就是我们一直说的一次 <strong>run</strong>（也就是 trace）。但"一次 run"在真正在用的存储层里<strong>没有专属 ID</strong>，是靠"下一条顶层 user 消息标志新 run 开始"这个模式推出来的隐含边界，不是持久化字段本身；如果想要"退回某一步重新说"，产品给的答案不是在这条线上加个分支节点，而是<code>fork()</code> 出一个全新的、记着父会话是谁的会话文件。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/coding-agent/src/core/session-manager.ts</code>（<code>SessionEntryBase:46-51</code>、<code>SessionTreeNode:159-165</code>、<code>class SessionManager:855</code>），<code>pi/packages/coding-agent/src/core/agent-session-runtime.ts</code>（<code>fork():262-338</code>），<code>pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts</code>（<code>fork() 调用点 :1926</code>、<code>/clone 命令 handleCloneCommand:5155-5170</code>）。对照参照（未被采用的设计）：<code>pi/packages/agent/src/harness/session/types.ts</code>（<code>Entry:22-74</code>、<code>LaneRecord</code>/<code>OperationStartedRecord:87-112</code>/<code>OperationFinishedRecord:120-125</code>、<code>ForkOptions:359</code>）、<code>session.ts</code>（<code>class Session implements SessionTree:102</code>）。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：为什么"一次 run"没有专属 ID、分叉为什么是新开文件而不是加节点——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 10 of the pi-agent-core architecture course · <a href="../reference/0010-session-tree.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

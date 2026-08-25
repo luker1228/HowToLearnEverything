@@ -18,8 +18,16 @@
 <div class="nav"><a href="../lessons/0006-agent-vs-loop.html">← Lesson 6</a> · <a href="0005-context-compaction.html">参考卡片 5：上下文压缩</a></div>
 
 <p class="kicker">参考卡片 · Reference</p>
-<h1>Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</h1>
+<h1>Agent 类与 agent-loop：状态怎么被更新的</h1>
 <p class="subtitle">配套 Lesson 6。可打印，随时回来查。</p>
+
+<h2>为什么拆两层（先看这个）</h2>
+<p>核心矛盾：「跑一轮对话」的逻辑要同时满足"可单独测试""可在无常驻 Agent 场景复用（Lesson 5 的压缩摘要）""状态更新路径唯一"这三个跟对话逻辑本身无关的诉求。解法：拆成两个代码实体，中间只靠事件通信：</p>
+<table>
+<tr><th>代码实体</th><th>职责</th></tr>
+<tr><td><code>agent-loop.ts</code> 里的 <code>runAgentLoop</code></td><td>只管跑这一轮，不记得历史，事情发生就 <code>emit</code></td></tr>
+<tr><td><code>Agent</code> 类的实例</td><td>接住事件，<code>processEvents</code> 统一写进状态，再通过 <code>subscribe</code> 广播</td></tr>
+</table>
 
 <h2>调用链全景</h2>
 <pre>Agent.prompt(text)
@@ -27,12 +35,12 @@
       → createContextSnapshot()          // {systemPrompt, messages, tools} 的浅拷贝
       → createLoopConfig(options)        // 含 convertToLlm / shouldStopAfterTurn 等回调
       → runAgentLoop(messages, snapshot, config, emit=processEvents, signal, streamFn)
-          → 引擎内部跑 turn 循环，不断调用 emit(event)
-      → processEvents(event) 逐个折进 this._state
+          → runAgentLoop 内部跑 turn 循环，不断调用 emit(event)
+      → processEvents(event) 逐个写进 this._state
       → 广播给 subscribe() 的所有监听者</pre>
 <p>位置：<code>agent.ts:409-423</code>（<code>runPromptMessages</code>）、<code>437-443</code>（快照）、<code>agent-loop.ts:95-102</code>（<code>runAgentLoop</code> 签名）。</p>
 
-<h2>快照：引擎只看数据,不拿 Agent 引用</h2>
+<h2>快照：<code>runAgentLoop</code> 只看数据,不拿 Agent 引用</h2>
 <pre>private createContextSnapshot(): AgentContext {
 	return {
 		systemPrompt: this._state.systemPrompt,
@@ -40,7 +48,7 @@
 		tools: this._state.tools.slice(),
 	};
 }</pre>
-<p><code>runAgentLoop</code> 只接收这个普通对象 + <code>emit</code> 回调，从不持有 <code>Agent</code> 实例——这就是"纯函数式引擎"的字面含义。</p>
+<p><code>runAgentLoop</code> 只接收这个普通对象 + <code>emit</code> 回调，从不持有 <code>Agent</code> 实例——这就是"纯函数式"的字面含义。</p>
 
 <h2><code>processEvents</code>：字面意义上的 reducer</h2>
 <table>
@@ -61,10 +69,10 @@ for (const listener of this.listeners) {
 }</pre>
 <p>switch 分支跑完（状态已更新）之后才广播——监听者收到事件时 <code>agent.state</code> 已经是最新值，不会有竞态。<code>subscribe()</code>（<code>agent.ts:250-253</code>）注册监听者，返回取消订阅函数。</p>
 
-<h2>为什么拆两层</h2>
+<h2>三个诉求对应的代码证据</h2>
 <table>
-<tr><th>好处</th><th>证据</th></tr>
-<tr><td>引擎可脱离 Agent 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code> + mock <code>emit</code>，不需要构造 <code>Agent</code></td></tr>
+<tr><th>诉求</th><th>证据</th></tr>
+<tr><td><code>runAgentLoop</code> 可脱离 Agent 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code> + mock <code>emit</code>，不需要构造 <code>Agent</code></td></tr>
 <tr><td>纯逻辑可在无常驻 Agent 场景复用</td><td>Lesson 5：<code>harness/compaction/</code> 复用 <code>convertToLlm</code>，同一种"剥离可复用纯逻辑"的取向</td></tr>
 <tr><td>状态更新路径单一</td><td>所有状态变化只经过 <code>processEvents</code> 这一个 switch，没有旁路</td></tr>
 </table>

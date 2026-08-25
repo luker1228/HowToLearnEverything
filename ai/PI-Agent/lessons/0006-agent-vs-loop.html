@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lesson 6 · Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</title>
+<title>Lesson 6 · Agent 类与 agent-loop：状态怎么被更新的</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
@@ -11,20 +11,43 @@
 <div class="nav"><a href="0005-context-compaction.html">← Lesson 5</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0006-agent-vs-loop.html">参考卡片：Agent 与 agent-loop →</a></div>
 
 <p class="kicker">Lesson 6 · pi-agent-core</p>
-<h1>Agent 类与 agent-loop：仪表盘怎么接住引擎的事件</h1>
-<p class="subtitle">兑现 Lesson 5 结尾的彩蛋：Lesson 1 说过 <code>Agent</code> 是"仪表盘+油箱"、<code>agent-loop.ts</code> 是不持有状态的"引擎"——这节课打开这条边界，看仪表盘具体是怎么把引擎吐出来的事件，"折"成自己的状态的。</p>
+<h1>Agent 类与 agent-loop：状态怎么被更新的</h1>
+<p class="subtitle">兑现 Lesson 5 结尾的彩蛋：Lesson 1 说过 <code>agent-loop.ts</code> 导出的 <code>runAgentLoop</code> 是不持有状态的纯函数，<code>Agent</code> 类的实例才持有真正的状态——这节课打开这条边界，看这个拆分到底在解决什么问题，以及 <code>Agent</code> 具体怎么把 <code>runAgentLoop</code> 吐出来的事件写进自己的状态。</p>
+
+<h2>1. 问题：一份"跑一轮对话"的逻辑，要同时伺候好几个不相关的需求</h2>
+
+<p>设想你要从零实现一个 agent 系统。核心逻辑——「给一段历史 + 工具列表，决定要不要调用 LLM、要不要执行工具、什么时候停」——你自然会写成一个函数或一批方法。但很快会发现，这份逻辑还要同时满足另外一堆跟"跑一轮对话"本身毫无关系的需求：</p>
+
+<ul>
+<li>UI 要实时看到"助手正在打字"的流式内容，一次性返回结果不够用；</li>
+<li>用户可能在等待过程中追加消息，或者中途直接取消；</li>
+<li>可能同时有好几个地方（聊天窗口、日志、埋点）都想知道"现在状态变成什么样了"；</li>
+<li>Lesson 5 里见过：压缩生成摘要要单独发一次请求，复用的是"跑一轮对话"逻辑里的一部分（<code>convertToLlm</code>），但完全不需要背上 UI/订阅/排队这些包袱。</li>
+</ul>
+
+<p>如果把这些需求全塞进同一批方法里，会立刻撞上两个具体的麻烦：核心逻辑没法被单独测试（每次测试都要拉起一整套订阅、排队机制），也没法在"不需要完整 Agent"的场景里被复用（比如 Lesson 5 的摘要请求）。反过来，如果状态更新散落在到处都能改 <code>this._state</code> 的各个方法里，新增一个"我想知道状态变了"的监听点，就得满代码库找哪里动过状态。</p>
+
+<p>pi-agent-core 的解法，是把这份代码切成两个东西，中间只靠一套"事件"通信：</p>
+
+<table>
+<tr><th>代码实体</th><th>职责</th></tr>
+<tr><td><code>agent-loop.ts</code> 里的 <code>runAgentLoop</code></td><td>只管"这一轮该怎么跑"，不记得之前发生过什么，事情发生就调 <code>emit</code> 吐出去，别的什么都不管</td></tr>
+<tr><td><code>Agent</code> 类的实例</td><td>接住事件，用 <code>processEvents</code> 方法统一写进自己的状态，再通过 <code>subscribe</code> 广播给所有监听者</td></tr>
+</table>
+
+<p>这样一来，「<code>runAgentLoop</code> 内部怎么决定跑一轮对话」和「状态怎么被更新、谁能看到更新」变成两个可以分别验证的问题：<code>runAgentLoop</code> 只要保证"同样的输入吐出同样的事件序列"就算对，跟它是不是绑在某个 <code>Agent</code> 实例上无关；<code>Agent</code> 只要保证"每种事件类型都被正确写进状态，且只有这一条路径能改状态"就算对。下面就按这两条主线，对照代码看这套拆分具体怎么落地。</p>
 
 <div class="quiz" data-answer="processEvents;reducer">
-<div class="q-prompt">热身回忆：Lesson 1 说 <code>Agent</code> 类用一个方法把循环发出的每个事件"归约（reduce）"成新的状态，很像 Redux 的 reducer。这个方法叫什么？</div>
+<div class="q-prompt">热身回忆：往下看代码之前，先回忆一下——Lesson 1 说 <code>Agent</code> 类用哪个方法把循环发出的每个事件"归约（reduce）"成新的状态？</div>
 <input type="text" class="q-input" placeholder="填方法名">
 <button class="q-check">检查</button>
 <button class="q-reveal">显示答案</button>
 <div class="q-feedback"></div>
 </div>
 
-<h2>1. 引擎不认识"状态"这个词——它只认"快照"</h2>
+<h2>2. <code>runAgentLoop</code> 这一侧：为什么必须是纯函数</h2>
 
-<p><code>runAgentLoop</code>（<code>agent-loop.ts:95-102</code>）的签名是这样的：</p>
+<p>先看 <code>runAgentLoop</code> 这一侧怎么保证"可以单独测试、可以脱离 Agent 复用"。它的签名（<code>agent-loop.ts:95-102</code>）是这样的：</p>
 
 <pre>export async function runAgentLoop(
 	prompts: AgentMessage[],
@@ -47,9 +70,9 @@
 	};
 }</pre>
 
-<p><code>.slice()</code> 是关键细节：引擎拿到的是当前状态的一份拷贝，而不是指向 <code>Agent</code> 内部数组的引用。引擎跑的过程中即使想改，也改不到 <code>Agent</code> 真正的状态——它唯一能"通知"外部发生了什么的方式，是调用 <code>emit</code>。</p>
+<p><code>.slice()</code> 是关键细节：<code>runAgentLoop</code> 拿到的是当前状态的一份拷贝，而不是指向 <code>Agent</code> 内部数组的引用。<code>runAgentLoop</code> 跑的过程中即使想改，也改不到 <code>Agent</code> 真正的状态——它唯一能"通知"外部发生了什么的方式，是调用 <code>emit</code>。</p>
 
-<h2>2. <code>prompt()</code> 调用链：仪表盘怎么把快照和回调交给引擎</h2>
+<h2>3. <code>prompt()</code> 调用链：<code>Agent</code> 怎么把快照和回调交给 <code>runAgentLoop</code></h2>
 
 <p><code>Agent.prompt()</code> 最终落到 <code>runPromptMessages</code>（<code>agent.ts:409-423</code>）：</p>
 
@@ -59,29 +82,29 @@
 			messages,
 			this.createContextSnapshot(),          // ① 现做一份快照
 			this.createLoopConfig(options),         // ② 把配置（包括 convertToLlm）打包
-			(event) => this.processEvents(event),   // ③ 把 reducer 方法当回调传进去
+			(event) => this.processEvents(event),   // ③ 把 processEvents 方法当回调传进去
 			signal,
 			this.streamFunction,
 		);
 	});
 }</pre>
 
-<p>三行注释对应三件事：引擎需要「看到什么」（快照）、「能用什么规则处理消息/停止」（config）、「发生事情时该喊谁」（<code>emit</code> 回调）。<code>Agent</code> 类把这三样准备好，剩下的全部丢给引擎去跑——这也是为什么 <code>runAgentLoop</code> 可以在完全没有 <code>Agent</code> 实例的场景下被单独测试（<code>agent-loop.test.ts</code> 直接 mock 一个 <code>emit</code> 函数，不需要构造一个 <code>Agent</code>）。</p>
+<p>三行注释对应三件事：<code>runAgentLoop</code> 需要「看到什么」（快照）、「能用什么规则处理消息/停止」（config）、「发生事情时该调用哪个函数」（<code>emit</code> 回调）。<code>Agent</code> 类把这三样准备好，剩下的全部丢给 <code>runAgentLoop</code> 去跑——这也是为什么 <code>runAgentLoop</code> 可以在完全没有 <code>Agent</code> 实例的场景下被单独测试（<code>agent-loop.test.ts</code> 直接 mock 一个 <code>emit</code> 函数断言事件序列，不需要构造一个 <code>Agent</code>）。</p>
 
 <div class="quiz" data-type="choice">
 <div class="q-prompt"><code>createContextSnapshot()</code> 里 <code>messages: this._state.messages.slice()</code> 用了 <code>.slice()</code> 而不是直接 <code>this._state.messages</code>。如果去掉 <code>.slice()</code>，最可能出什么问题？</div>
 <div class="q-options">
 <button class="q-option">类型报错，TypeScript 不允许这样写</button>
-<button class="q-option" data-correct="true">引擎和 Agent 状态会共享同一个数组引用，理论上引擎内部的任何数组操作都可能直接污染 Agent 的真实状态，破坏"引擎不持有/不改动外部状态"的假设</button>
+<button class="q-option" data-correct="true"><code>runAgentLoop</code> 和 <code>Agent</code> 状态会共享同一个数组引用，理论上 <code>runAgentLoop</code> 内部的任何数组操作都可能直接污染 <code>Agent</code> 的真实状态，破坏"<code>runAgentLoop</code> 不持有/不改动外部状态"的假设</button>
 <button class="q-option">程序会立刻崩溃</button>
 <button class="q-option">没有区别，因为数组在 JS 里本来就是值传递</button>
 </div>
 <div class="q-feedback"></div>
 </div>
 
-<h2>3. <code>processEvents</code>：逐个事件类型的 switch，就是字面意义上的 reducer</h2>
+<h2>4. <code>Agent</code> 这一侧：<code>processEvents</code> 就是字面意义上的 reducer</h2>
 
-<p><code>agent.ts:544-591</code>，完整贴出来看比想象中还朴素：</p>
+<p><code>runAgentLoop</code> 那边解决了"可测试、可复用"，现在看 <code>Agent</code> 那边怎么解决"状态更新路径唯一"。<code>agent.ts:544-591</code>，完整贴出来看比想象中还朴素——就是一个 switch：</p>
 
 <pre>private async processEvents(event: AgentEvent): Promise&lt;void&gt; {
 	switch (event.type) {
@@ -126,7 +149,15 @@
 <li><strong>没有对应的 <code>case</code> 就什么都不做</strong>——比如 <code>agent_start</code>、<code>turn_start</code> 这两种事件（Lesson 1 事件时序里出现过）在这个 switch 里没有分支，说明它们纯粹是"通知"，不改变 <code>Agent</code> 的任何状态字段。</li>
 </ul>
 
-<h2>4. 事件先"折"进状态，再广播给监听者——顺序不能反</h2>
+<div class="quiz" data-answer="turn_end;agent_end">
+<div class="q-prompt">小测验：<code>turn_end</code> 事件里，<code>processEvents</code> 只在一种情况下才会写 <code>this._state.errorMessage</code>——是什么情况？（提示：看 message 的 role 和某个字段）</div>
+<input type="text" class="q-input" placeholder="填条件描述里出现的事件类型或字段名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>5. 顺序：先更新状态，再广播给监听者——不能反</h2>
 
 <p><code>processEvents</code> 最后几行（<code>agent.ts:584-590</code>）：</p>
 
@@ -142,35 +173,29 @@ for (const listener of this.listeners) {
 	return () => this.listeners.delete(listener);   // 返回一个取消订阅函数
 }</pre>
 
-<p>关键顺序：<strong>switch 分支（状态更新）先跑完，for 循环（广播给监听者）后跑</strong>。这意味着 UI 层的监听者收到某个事件时，<code>agent.state</code> 已经是更新之后的最新值——不会出现"UI 拿到 <code>message_end</code> 事件，但 <code>state.messages</code> 里还没有这条消息"的竞态。</p>
+<p>关键顺序：<strong>switch 分支（状态更新）先跑完，for 循环（广播给监听者）后跑</strong>。这意味着 UI 层的监听者收到某个事件时，<code>agent.state</code> 已经是更新之后的最新值——不会出现"UI 拿到 <code>message_end</code> 事件，但 <code>state.messages</code> 里还没有这条消息"的竞态。这也是"多个地方都想知道状态变了"这个诉求（第 1 节列的第三条）真正被满足的地方：不管有几个监听者，它们看到的都是同一个、已经落地的状态。</p>
 
-<div class="quiz" data-answer="turn_end;agent_end">
-<div class="q-prompt">小测验：<code>turn_end</code> 事件里，<code>processEvents</code> 只在一种情况下才会写 <code>this._state.errorMessage</code>——是什么情况？（提示：看 message 的 role 和某个字段）</div>
-<input type="text" class="q-input" placeholder="填条件描述里出现的事件类型或字段名">
-<button class="q-check">检查</button>
-<button class="q-reveal">显示答案</button>
-<div class="q-feedback"></div>
-</div>
+<h2>6. 回头看：第 1 节列的三个诉求，对应上了吗？</h2>
 
-<h2>5. 为什么要拆成两层，而不是让 <code>Agent</code> 自己把逻辑写在方法里？</h2>
-
-<p><code>Agent</code> 类头上的注释写得很直接（<code>agent.ts:167-171</code>）：</p>
+<p>代码库本身没有写"为什么"的长篇论证，类注释只有一句话（<code>agent.ts:167-171</code>）：</p>
 
 <blockquote>Stateful wrapper around the low-level agent loop.<br>
 <code>Agent</code> owns the current transcript, emits lifecycle events, executes tools, and exposes queueing APIs for steering and follow-up messages.</blockquote>
 
-<p>代码库本身没有写"为什么"的长篇论证，但从代码结构能反推出三个实际好处：</p>
+<p>但把前面几节的代码证据摆在一起，正好对应上第 1 节提出的三个诉求：</p>
 
 <table>
-<tr><th>好处</th><th>证据</th></tr>
-<tr><td>引擎可以脱离 <code>Agent</code> 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code>，传一个 mock 的 <code>emit</code> 函数断言事件序列，完全不需要构造一个 <code>Agent</code> 实例</td></tr>
-<tr><td>引擎可以在"没有常驻 <code>Agent</code>"的场景里被复用</td><td>Lesson 5 见过：<code>harness/compaction/</code> 生成摘要时复用的是 <code>convertToLlm</code>（同一层的另一个可复用函数），体现的是同一种设计取向——把可复用的纯逻辑从有状态的外壳里剥离出来</td></tr>
-<tr><td>状态更新路径单一、可预测</td><td>所有状态变化只能通过 <code>processEvents</code> 这一个 switch 发生——不存在"某个方法直接改 <code>this._state.messages</code>"的旁路，调试时只需要盯住一个函数</td></tr>
+<tr><th>第 1 节的诉求</th><th>代码证据</th></tr>
+<tr><td>核心逻辑可以脱离 <code>Agent</code> 单独测试</td><td><code>agent-loop.test.ts</code> 直接调 <code>runAgentLoop</code>，传一个 mock 的 <code>emit</code> 函数断言事件序列，完全不需要构造一个 <code>Agent</code> 实例</td></tr>
+<tr><td>核心逻辑可以在"没有常驻 <code>Agent</code>"的场景里被复用</td><td>Lesson 5 见过：<code>harness/compaction/</code> 生成摘要时复用的是 <code>convertToLlm</code>（同一层的另一个可复用函数）——体现的是同一种设计取向：把可复用的纯逻辑从有状态的外壳里剥离出来</td></tr>
+<tr><td>状态更新路径单一、谁都能订阅但改不了状态</td><td>所有状态变化只能通过 <code>processEvents</code> 这一个 switch 发生，监听者只能"被通知"（<code>subscribe</code>），拿不到能直接改状态的接口</td></tr>
 </table>
+
+<p>三条诉求，对应的正是「<code>runAgentLoop</code> 是纯函数」（第 2、3 节）+「<code>processEvents</code> 是唯一 reducer」（第 4 节）+「先更新再广播」（第 5 节）这三件事——拆成两层不是为了拆而拆，是这三个具体麻烦逼出来的结构。</p>
 
 <h2>下一步的彩蛋预告</h2>
 
-<p>这节课看到 <code>Agent</code> 怎么"接住"引擎吐出来的事件，但还没看引擎内部<strong>怎么决定要不要执行工具、并行还是顺序执行</strong>——这是 Lesson 2 结尾故意跳过、留到现在还没细讲的部分，对应书里骨架的 <code>constrain</code>/<code>verify</code>/<code>correct</code> 三步。下一课我们打开 <code>harness/tools/</code>，看 <code>beforeToolCall</code>/<code>afterToolCall</code> 钩子和并行执行策略的实现。</p>
+<p>这节课看到 <code>Agent</code> 怎么接住 <code>runAgentLoop</code> 吐出来的事件，但还没看 <code>runAgentLoop</code> 内部<strong>怎么决定要不要执行工具、并行还是顺序执行</strong>——这是 Lesson 2 结尾故意跳过、留到现在还没细讲的部分，对应书里骨架的 <code>constrain</code>/<code>verify</code>/<code>correct</code> 三步。下一课我们打开 <code>harness/tools/</code>，看 <code>beforeToolCall</code>/<code>afterToolCall</code> 钩子和并行执行策略的实现。</p>
 
 <div class="callout source">
 <p><strong>本课主参照</strong>：<code>pi/packages/agent/src/agent.ts</code>（<code>defaultConvertToLlm:33-37</code>、类注释与私有字段<code>:160-175</code>、<code>runPromptMessages:409-423</code>、<code>createContextSnapshot:437-443</code>、<code>processEvents:544-591</code>、<code>subscribe:250-253</code>），<code>pi/packages/agent/src/agent-loop.ts</code>（<code>runAgentLoop</code> 签名 <code>:95-102</code>）。</p>

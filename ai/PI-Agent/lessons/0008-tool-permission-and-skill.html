@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 8 · 工具执行的权限控制，以及 Skill 和 Tool 的区别</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0007-steering.html">← Lesson 7</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0008-tool-permission-and-skill.html">参考卡片：权限控制与 Skill →</a></div>
+
+<p class="kicker">Lesson 8 · pi-agent-core</p>
+<h1>工具执行的权限控制，以及 Skill 和 Tool 的区别</h1>
+<p class="subtitle">Lesson 1 说过 <code>AgentTool</code> 是「手脚」——能读写文件、跑 shell 命令。这节课拆两件事：手脚被允许做到什么程度谁说了算，以及 <code>Skill</code>（另一个你可能在别处听说过的名字）跟 <code>AgentTool</code> 到底是不是一回事。</p>
+
+<h2>Part A · 工具执行的权限控制</h2>
+
+<h3>1. 问题：模型说"调用它"，就一定会跑吗？</h3>
+
+<p>一旦你把一个 <code>AgentTool</code>（比如能执行任意 shell 命令的 <code>bash</code> 工具）注册给 <code>Agent</code>，模型在 assistant 消息里发出一个 <code>toolCall</code> 之后，这条命令是不是就无条件执行了？如果模型决定跑一个危险命令（比如删除一个目录），有没有地方能在真正执行前把它拦下来？</p>
+
+<p>源码里有两层拦截，第一层甚至发生在"要不要问权限"之前：</p>
+
+<h3>2. 第一层：没注册的工具，直接查不到</h3>
+
+<p><code>prepareToolCall</code>（<code>agent-loop.ts:600-614</code>）一开始就去 <code>currentContext.tools</code>（Lesson 6 学过的那份快照）里按名字找工具：</p>
+
+<pre>const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+if (!tool) {
+	return {
+		kind: "immediate",
+		result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+		isError: true,
+	};
+}</pre>
+
+<p>模型只能"看见"并调用 <code>Agent</code> 构造时/运行时注册进 <code>state.tools</code> 的那些工具。没注册 = 模型怎么"想"调用都拿不到——这是最朴素的一层权限控制：不给，就没有。</p>
+
+<h3>3. 第二层：注册过的工具，执行前还要过 <code>beforeToolCall</code></h3>
+
+<p>工具存在、参数也校验通过之后，<code>agent-loop.ts:619-646</code> 还有一道关卡：</p>
+
+<pre>if (config.beforeToolCall) {
+	const beforeResult = await config.beforeToolCall(
+		{ assistantMessage, toolCall, args: validatedArgs, context: currentContext },
+		signal,
+	);
+	if (beforeResult?.block) {
+		const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+		if (beforeResult.terminate === true) result.terminate = true;
+		return { kind: "immediate", result, isError: true };
+	}
+}</pre>
+
+<p><code>beforeResult.block</code> 是真正的开关：返回 <code>{ block: true, reason }</code>，这次工具调用就不会真的执行，<code>runAgentLoop</code> 会直接给模型一条错误结果（内容是 <code>reason</code>），流程照常继续，模型看到"这次被拒绝了"，可能会换个说法再试一次或者放弃。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>pi-agent-core</code> 自带的 <code>bash</code>/<code>edit</code>/<code>read</code>/<code>write</code> 这几个内置工具，有没有内嵌一个"先问用户是否允许"的默认实现？</div>
+<div class="q-options">
+<button class="q-option">有，bash 工具执行危险命令前会自动弹出确认</button>
+<button class="q-option" data-correct="true">没有——这几个内置工具本身都没有权限检查逻辑，<code>beforeToolCall</code> 只是一个空的扩展点，要不要问、问谁、怎么问，完全由把这些工具组装进 <code>Agent</code> 的那个 App 自己决定</button>
+<button class="q-option">有，但只对 bash 生效，其他三个工具不检查</button>
+<button class="q-option">有，通过读取一个全局权限配置文件实现</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<p>翻一遍 <code>harness/tools/bash.ts</code>、<code>edit.ts</code>、<code>read.ts</code>、<code>write.ts</code> 就能验证：里面只有路径解析（<code>resolveToolPath</code>）和执行逻辑，没有任何权限判断代码。这跟 Lesson 1 的 <code>streamFn</code>、Lesson 4 的 <code>convertToLlm</code> 是同一个套路——<code>pi-agent-core</code> 只留一个钩子（这里是 <code>beforeToolCall</code>），自己不做任何决策，策略完全交给调用方。</p>
+
+<h2>Part B · Skill 和 Tool，是不是同一种东西</h2>
+
+<h3>4. 问题：<code>Skill</code> 也能被模型"调用"，那它跟 <code>AgentTool</code> 有什么不同？</h3>
+
+<p><code>pi-agent-core</code> 里确实还有一个独立的 <code>Skill</code> 类型（<code>harness/skills.ts</code>、<code>harness/types.ts</code>），从 <code>SKILL.md</code> 文件加载。先别看代码，猜一猜：</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt"><code>Skill</code> 这个接口里，有没有类似 <code>AgentTool.execute()</code> 那样"可以被调用执行"的方法，以及类似 <code>parameters</code> 那样的参数 schema？</div>
+<div class="q-options">
+<button class="q-option">有，Skill 也有 execute() 和 parameters，只是换了个名字</button>
+<button class="q-option" data-correct="true">都没有——Skill 就是一段文本（SKILL.md 的内容），没有可执行的函数，也没有参数契约</button>
+<button class="q-option">有 execute()，但没有 parameters</button>
+<button class="q-option">没有 execute()，但有 parameters（用来描述文件里的变量）</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<p><code>Skill</code> 接口的完整定义（<code>harness/types.ts:46-57</code>）：</p>
+
+<pre>export interface Skill {
+	name: string;
+	description: string;
+	content: string;        // 完整的技能说明文本
+	filePath: string;
+	disableModelInvocation?: boolean;
+}</pre>
+
+<p>对比 <code>AgentTool</code>（<code>types.ts:386-409</code>）：<code>execute()</code> 方法、<code>parameters</code>（JSON Schema）、<code>executionMode</code>（并行/顺序）——这些 <code>Skill</code> 一个都没有。<code>Skill</code> 本质上是一份"内容"，不是一个"可调用的动作"。</p>
+
+<h3>5. 模型怎么"知道"有这个 Skill：只看到名字和描述，看不到内容</h3>
+
+<p><code>formatSkillsForSystemPrompt</code>（<code>harness/system-prompt.ts:3-23</code>）把 Skill 列表拼进系统提示词：</p>
+
+<pre>&lt;available_skills&gt;
+  &lt;skill&gt;
+    &lt;name&gt;xxx&lt;/name&gt;
+    &lt;description&gt;xxx&lt;/description&gt;
+    &lt;location&gt;/path/to/SKILL.md&lt;/location&gt;
+  &lt;/skill&gt;
+&lt;/available_skills&gt;</pre>
+
+<p>注意只塞了 <code>name</code>/<code>description</code>/<code>filePath</code>（对应上面的 <code>location</code>），完整的 <code>content</code> 根本不在系统提示词里。模型一开始只能看到"有这么一个技能，大概是干什么用的，文件在哪"，跟 <code>AgentTool</code> 需要完整参数 schema 才能被调用完全不是一回事——Skill 更像是留了一个路标，而不是一个能直接触发执行的接口。</p>
+
+<h3>6. 真正"用"一个 Skill：把全文塞进上下文，不走工具调用协议</h3>
+
+<p><code>formatSkillInvocation</code>（<code>harness/skills.ts:38-41</code>）：</p>
+
+<pre>export function formatSkillInvocation(skill: Skill, additionalInstructions?: string): string {
+	const skillBlock = `&lt;skill name="${skill.name}" location="${skill.filePath}"&gt;\n...\n${skill.content}\n&lt;/skill&gt;`;
+	return additionalInstructions ? `${skillBlock}\n\n${additionalInstructions}` : skillBlock;
+}
+</pre>
+
+<p>这个函数只是拼一段字符串，把 Skill 的<strong>全文</strong>包进 <code>&lt;skill&gt;...&lt;/skill&gt;</code> 标记里。它不产生 <code>tool_execution_start</code>/<code>tool_execution_end</code> 事件，不经过 <code>beforeToolCall</code>/<code>afterToolCall</code>，因为它压根不在 Lesson 6 讲过的那条"assistant 发 <code>toolCall</code> → <code>prepareToolCall</code> → <code>execute()</code> → <code>tool_execution_*</code> 事件"链路上。谁来决定"现在要注入哪个 Skill 的全文"、以什么形式塞进哪条消息，是调用这个函数的那一层（App/更上层的 harness）自己的事，<code>pi-agent-core</code> 本身不管。</p>
+
+<table>
+<tr><th></th><th><code>AgentTool</code></th><th><code>Skill</code></th></tr>
+<tr><td>本质</td><td>一个可执行的函数（<code>execute()</code>）</td><td>一段文本内容（<code>content</code>）</td></tr>
+<tr><td>模型怎么发起</td><td>assistant 消息里的结构化 <code>toolCall</code> block，带 JSON Schema 校验过的参数</td><td>没有结构化调用协议；模型先在系统提示词里看到 name/description，真正用上全文靠 App 层调用 <code>formatSkillInvocation</code> 注入</td></tr>
+<tr><td>执行事件</td><td><code>tool_execution_start</code>/<code>_end</code>，经过 <code>runAgentLoop</code> 的工具调用链路</td><td>没有对应事件——不是"执行"，是"把一段文本加进上下文"</td></tr>
+<tr><td>权限控制点</td><td><code>beforeToolCall</code>/<code>afterToolCall</code> 可以 <code>block</code></td><td>没有对应的钩子——没有"执行"这个动作，也就没有可拦截的点</td></tr>
+</table>
+
+<p>这也是 Part A 和 Part B 最终对上的地方：<strong>权限控制（<code>beforeToolCall</code>）是专门针对"可执行动作"（<code>AgentTool</code>）设计的机制</strong>——Skill 因为根本不经过执行链路，天然就不在这套控制范围内；如果一份 Skill 文本里写了危险指令，防线要靠别的机制（比如它引导模型去调用某个工具，那条工具调用照样会经过 <code>beforeToolCall</code>）。</p>
+
+<h2>下一步的彩蛋预告</h2>
+
+<p>这节课看到的 <code>Skill</code> 类型和 <code>formatSkillsForSystemPrompt</code>/<code>formatSkillInvocation</code> 都在 <code>harness/</code> 目录下，但还没打开过 <code>harness/agent-harness.ts</code> 本身——那是一个跟 <code>Agent</code> 类平行的、更高层的编排类，<code>skills</code>/<code>promptTemplates</code> 这些"资源"就是挂在它上面的。留到下一课专门打开这一层。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/agent/src/agent-loop.ts</code>（<code>prepareToolCall:600-651</code>，工具查找与 <code>beforeToolCall</code>/<code>block</code> 逻辑），<code>pi/packages/agent/src/types.ts</code>（<code>AgentTool:386-409</code>、<code>BeforeToolCallResult:56-68</code>），<code>pi/packages/agent/src/harness/types.ts</code>（<code>Skill:46-57</code>），<code>pi/packages/agent/src/harness/system-prompt.ts</code>（<code>formatSkillsForSystemPrompt:3-23</code>），<code>pi/packages/agent/src/harness/skills.ts</code>（<code>formatSkillInvocation:38-41</code>、<code>loadSkills:50-76</code>），以及内置工具目录 <code>pi/packages/agent/src/harness/tools/*.ts</code>（用于验证"没有内嵌权限检查"）。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：权限控制的两层拦截、Skill 和 Tool 各自的调用路径——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 8 of the pi-agent-core architecture course · <a href="../reference/0008-tool-permission-and-skill.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

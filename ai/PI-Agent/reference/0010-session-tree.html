@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · Session 树</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0010-session-tree.html">← Lesson 10</a> · <a href="0009-skill-progressive-loading.html">参考卡片 9：Skill 渐进式加载</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>Session：多次 run 怎么串成一棵树</h1>
+<p class="subtitle">配套 Lesson 10。可打印，随时回来查。范围注意：本课讲的是 <code>packages/coding-agent</code> 真正在用的一套（<code>SessionEntry</code>/<code>SessionManager</code>），不是 <code>packages/agent/src/harness/session</code> 里那套定义齐全但未被接上的 <code>Record</code>/<code>runId</code> 系统。</p>
+
+<h2>存储的基本单位：只认父节点，不认"第几次 run"</h2>
+<pre>export interface SessionEntryBase {   // session-manager.ts:46-51
+	type: string;
+	id: string;
+	parentId: string | null;   // 只指向"我的上一条"
+	timestamp: string;
+}</pre>
+<p>没有 <code>runId</code> 字段。"这些消息属于同一次 run"是从"下一条顶层 <code>role==="user"</code> 的消息开始新 run"这个模式推出来的，不是持久化字段本身。</p>
+
+<h2>树的形成：父指针分组</h2>
+<pre>export interface SessionTreeNode {    // session-manager.ts:159-165
+	entry: SessionEntry;
+	children: SessionTreeNode[];        // 同 parentId 的多条 entry = 多个分支
+}</pre>
+<p>跟 git commit 图同构：正常情况下每个节点一个孩子，退化成一条线；有分叉才用得上"树"。</p>
+
+<h2>分叉怎么触发：fork()，两种 position</h2>
+<table>
+<tr><th><code>position</code></th><th>场景</th><th>行为</th></tr>
+<tr><td><code>"at"</code></td><td><code>/clone</code> 复制当前会话</td><td><code>targetLeafId = selectedEntry.id</code>，原地分叉</td></tr>
+<tr><td><code>"before"</code>（默认）</td><td>选中一条用户消息回退重说</td><td><code>targetLeafId = selectedEntry.parentId</code>，取出消息原文塞回输入框</td></tr>
+</table>
+<p><strong>关键点</strong>：分叉不是在同一文件里加节点，是 <code>sessionManager.createBranchedSession(targetLeafId)</code> 真正开一个新会话文件，新文件记着父会话是谁（<code>agent-session-runtime.ts:262-338</code>）。磁盘上的"树"其实是一组互相记父会话的独立文件家族。</p>
+
+<h2>未被采用的另一套设计（对照，别搞混）</h2>
+<p><code>packages/agent/src/harness/session/types.ts</code> 定义了 <code>OperationStartedRecord</code>/<code>OperationFinishedRecord</code>（带 <code>runId</code>，<code>intent.kind: "run"|"compaction"|"navigation"</code>）和 <code>SessionTree</code>/<code>ForkOptions{scope:"branch"|"tree"}</code>——类型齐全、有单测（<code>reducer.test.ts</code>），但 <code>coding-agent/src/</code> 里搜不到任何调用。跟 Lesson 9 的 <code>AgentHarness.skill()</code> 是同一种"设计已经写好、产品没接上"的情况。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/coding-agent/src/core/session-manager.ts</code>：<code>SessionEntryBase:46-51</code>、<code>SessionTreeNode:159-165</code>、<code>class SessionManager:855</code></li>
+<li><code>pi/packages/coding-agent/src/core/agent-session-runtime.ts</code>：<code>fork():262-338</code></li>
+<li><code>pi/packages/coding-agent/src/modes/interactive/interactive-mode.ts</code>：<code>:1926</code>、<code>handleCloneCommand:5155-5170</code></li>
+<li>对照：<code>pi/packages/agent/src/harness/session/types.ts</code>（<code>Entry:22-74</code>、<code>LaneRecord:87-212</code>、<code>ForkOptions:359</code>）、<code>session.ts:102</code></li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 10 · pi-agent-core / coding-agent architecture course</footer>
+
+</body>
+</html>

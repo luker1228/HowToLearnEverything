@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · 工具权限控制与 Skill</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0008-tool-permission-and-skill.html">← Lesson 8</a> · <a href="0007-steering.html">参考卡片 7：Steering</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>工具执行的权限控制，以及 Skill 和 Tool 的区别</h1>
+<p class="subtitle">配套 Lesson 8。可打印，随时回来查。</p>
+
+<h2>权限控制：两层拦截</h2>
+<table>
+<tr><th>层</th><th>位置</th><th>机制</th></tr>
+<tr><td>① 没注册的工具</td><td><code>agent-loop.ts:607-614</code></td><td><code>currentContext.tools?.find(...)</code> 找不到就直接返回 <code>Tool xxx not found</code> 错误，根本进不到执行阶段</td></tr>
+<tr><td>② 已注册工具的执行前检查</td><td><code>agent-loop.ts:619-646</code></td><td><code>config.beforeToolCall(context, signal)</code> 返回 <code>{ block: true, reason }</code> 就不执行，改成一条错误 tool 结果返回给模型</td></tr>
+</table>
+<p><code>BeforeToolCallResult</code>（<code>types.ts:61-69</code>）：<code>block</code>/<code>reason</code>/<code>terminate</code>。<strong>关键事实</strong>：内置工具 <code>bash</code>/<code>edit</code>/<code>read</code>/<code>write</code>（<code>harness/tools/*.ts</code>）自己都没有权限检查代码——<code>beforeToolCall</code> 是纯扩展点，问不问、怎么问，全由把这些工具组装进 <code>Agent</code> 的 App 决定。跟 Lesson 1 的 <code>streamFn</code>、Lesson 4 的 <code>convertToLlm</code> 同一个套路：harness 只留钩子，不做决策。</p>
+
+<h2>Skill 接口：没有 execute，没有参数 schema</h2>
+<pre>export interface Skill {                       // harness/types.ts:46-57
+	name: string;
+	description: string;
+	content: string;        // 完整技能说明文本
+	filePath: string;
+	disableModelInvocation?: boolean;
+}</pre>
+<p>对比 <code>AgentTool</code>（<code>types.ts:386-409</code>）：有 <code>execute()</code>、<code>parameters</code>（JSON Schema）、<code>executionMode</code>。Skill 一个都没有——它是一段内容，不是一个可调用的动作。</p>
+
+<h2>模型怎么"看见" Skill：只有名字和描述，不含全文</h2>
+<pre>&lt;available_skills&gt;                          // formatSkillsForSystemPrompt, system-prompt.ts:3-23
+  &lt;skill&gt;
+    &lt;name&gt;xxx&lt;/name&gt;
+    &lt;description&gt;xxx&lt;/description&gt;
+    &lt;location&gt;/path/to/SKILL.md&lt;/location&gt;
+  &lt;/skill&gt;
+&lt;/available_skills&gt;</pre>
+<p>只塞 <code>name</code>/<code>description</code>/<code>filePath</code> 进系统提示词，<code>content</code>（全文）不在里面。</p>
+
+<h2>真正"用"一个 Skill：拼字符串塞进上下文，不走工具调用链路</h2>
+<pre>export function formatSkillInvocation(skill: Skill, additionalInstructions?: string): string {
+	// skills.ts:38-41 —— 只是拼一段 &lt;skill&gt;...&lt;/skill&gt; 字符串，把 skill.content 全文包进去
+}</pre>
+<p>不产生 <code>tool_execution_start</code>/<code>_end</code> 事件，不经过 <code>beforeToolCall</code>/<code>afterToolCall</code>——它不在 Lesson 6 讲过的「assistant 发 <code>toolCall</code> → <code>prepareToolCall</code> → <code>execute()</code> → <code>tool_execution_*</code>」这条链路上。什么时候注入哪个 Skill 全文，由调用这个函数的上层（App/更高层 harness）决定。</p>
+
+<h2>对照表</h2>
+<table>
+<tr><th></th><th><code>AgentTool</code></th><th><code>Skill</code></th></tr>
+<tr><td>本质</td><td>可执行函数</td><td>一段文本内容</td></tr>
+<tr><td>模型发起方式</td><td>结构化 <code>toolCall</code> block + 参数 schema 校验</td><td>系统提示词里的 name/description；全文靠 App 层显式注入</td></tr>
+<tr><td>执行事件</td><td><code>tool_execution_start</code>/<code>_end</code></td><td>无</td></tr>
+<tr><td>权限控制点</td><td><code>beforeToolCall</code>/<code>afterToolCall</code></td><td>无——没有"执行"这个动作可拦</td></tr>
+</table>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/agent/src/agent-loop.ts</code>：<code>prepareToolCall:600-651</code></li>
+<li><code>pi/packages/agent/src/types.ts</code>：<code>BeforeToolCallResult:61-69</code>、<code>AgentTool:386-409</code></li>
+<li><code>pi/packages/agent/src/harness/types.ts</code>：<code>Skill:46-57</code></li>
+<li><code>pi/packages/agent/src/harness/system-prompt.ts</code>：<code>formatSkillsForSystemPrompt:3-23</code></li>
+<li><code>pi/packages/agent/src/harness/skills.ts</code>：<code>formatSkillInvocation:38-41</code>、<code>loadSkills:50-76</code></li>
+<li><code>pi/packages/agent/src/harness/tools/{bash,edit,read,write}.ts</code>：验证"内置工具无内嵌权限检查"</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 8 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

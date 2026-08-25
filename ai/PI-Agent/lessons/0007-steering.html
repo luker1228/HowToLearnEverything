@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 7 · Steering：Agent 正在工作时怎么插入新指令</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0006-agent-vs-loop.html">← Lesson 6</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0007-steering.html">参考卡片：Steering →</a></div>
+
+<p class="kicker">Lesson 7 · pi-agent-core</p>
+<h1>Steering：Agent 正在工作时怎么插入新指令</h1>
+<p class="subtitle">Lesson 6 引用过 <code>Agent</code> 类头上的注释：「exposes queueing APIs for steering and follow-up messages」——一直没打开这句话。这节课打开它。</p>
+
+<h2>1. 问题：Agent 还在跑，你又想加一句话，会发生什么</h2>
+
+<p>场景：你让 <code>Agent</code> 修一个 bug，它已经开始读文件、跑工具调用了。这时候你想起来一件事——"顺便也查一下测试文件"——你不想等它把当前这次 <code>prompt()</code> 完全跑完再补。直觉的做法是再调一次 <code>prompt("顺便查一下测试文件")</code>。源码里 <code>prompt()</code> 一开头就检查了这件事（<code>agent.ts:351-354</code>）：</p>
+
+<pre>async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise&lt;void&gt; {
+	if (this.activeRun) {
+		throw new Error(
+			"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+		);
+	}
+	...
+}</pre>
+
+<p>直接抛错。这不是 bug，是 Lesson 6 学过的那条规则的自然结果：<code>Agent</code> 同一时间只有一次 <code>runAgentLoop</code> 在跑（<code>activeRun</code> 只有一份），状态更新路径要保持单一，不可能同时接受两组并发的 <code>prompt()</code> 调用互相覆盖对方的状态。错误信息里已经指名了正确的 API：<code>steer()</code> 和 <code>followUp()</code>。这节课看 <code>steer()</code>。</p>
+
+<div class="quiz" data-answer="activeRun">
+<div class="q-prompt">热身：结合 Lesson 6，<code>prompt()</code> 会检查哪个字段来判断"当前是不是已经有一次运行在进行中"？</div>
+<input type="text" class="q-input" placeholder="填字段名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>2. <code>steer()</code> 本身只做一件很小的事：排队</h2>
+
+<p><code>steer()</code>（<code>agent.ts:283-285</code>）：</p>
+
+<pre>steer(message: AgentMessage): void {
+	this.steeringQueue.enqueue(message);
+}</pre>
+
+<p>注意它是同步方法，没有 <code>await</code>，也不直接接触 <code>runAgentLoop</code>——它只是把消息塞进 <code>steeringQueue</code>（一个 <code>PendingMessageQueue</code> 实例，<code>agent.ts:125-158</code>），立刻返回。"消息什么时候真正被送进对话"是另一个完全独立的问题，留给下一节。</p>
+
+<h2>3. 猜一猜：正在跑的工具调用，会被立刻打断吗？</h2>
+
+<p>先别看答案：假设 assistant 这一轮消息里一次性发起了 3 个工具调用（比如同时读 3 个文件），其中一个还没跑完的时候，你调用了 <code>steer()</code>。这条消息会不会立刻插进去，打断那个还在跑的工具调用？</p>
+
+<p><code>AgentLoopConfig.getSteeringMessages</code> 的文档注释（<code>types.ts:234-241</code>）已经给出了答案：</p>
+
+<blockquote>Returns steering messages to inject into the conversation mid-run.<br>
+Called after the current assistant turn finishes executing its tool calls, unless <code>shouldStopAfterTurn</code> exits first.<br>
+Use this for "steering" the agent while it's working.</blockquote>
+
+<p>答案是<strong>不会</strong>。<code>getSteeringMessages</code> 只会在"当前这一轮的 assistant 消息 + 它发起的所有工具调用全部跑完"之后才被调用——具体位置在 <code>agent-loop.ts:259</code>，正好在这一轮的 <code>turn_end</code> 事件发出、<code>shouldStopAfterTurn</code> 检查完之后，下一轮开始之前：</p>
+
+<pre>pendingMessages = (await config.getSteeringMessages?.()) || [];</pre>
+
+<p>也就是说，<code>steer()</code> 排的队不是"打断"，是"占下一轮开头的位置"。3 个并行工具调用只要有一个还没结束，这一轮就没结束，你的消息就还在队列里等着。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">如果 <code>runAgentLoop</code> 一开始（第一轮 assistant 消息还没发出）你就调用了 <code>steer()</code>，这条消息会怎么处理？</div>
+<div class="q-options">
+<button class="q-option">被丢弃，steer() 只在运行中途生效</button>
+<button class="q-option" data-correct="true">同样会被处理——<code>agent-loop.ts:166</code> 在进入循环前就先检查了一次 <code>getSteeringMessages</code>，专门应对"用户在等待期间就已经打字"的情况</button>
+<button class="q-option">报错，因为这时候队列还没初始化</button>
+<button class="q-option">会立刻打断 LLM 的首次请求</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>4. 排队多条消息，不会一次性全塞进去</h2>
+
+<p><code>PendingMessageQueue.drain()</code>（<code>agent.ts:141-154</code>）：</p>
+
+<pre>drain(): AgentMessage[] {
+	if (this.mode === "all") {
+		const drained = this.messages.slice();
+		this.messages = [];
+		return drained;
+	}
+
+	const first = this.messages[0];
+	if (!first) {
+		return [];
+	}
+	this.messages = this.messages.slice(1);
+	return [first];
+}</pre>
+
+<p>默认的 <code>mode</code> 是 <code>"one-at-a-time"</code>（<code>agent.ts:231</code>：<code>new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time")</code>）：即使你连续调用三次 <code>steer()</code> 排了三条消息，默认策略下每次轮到 <code>drain()</code> 也只会取出最早的那一条，剩下两条继续留在队列里，会分散在接下来的几轮 turn 里逐条注入——不是一次性全部塞进对话。想要一次性全部注入，要显式把 <code>steeringMode</code> 设成 <code>"all"</code>。</p>
+
+<h2>5. <code>steer()</code> 和 <code>followUp()</code>：注入时机不同</h2>
+
+<p><code>followUp()</code>（<code>agent.ts:288-290</code>）的写法跟 <code>steer()</code> 几乎一样——同样只是排队。区别在消费的时机。<code>getFollowUpMessages</code> 的文档注释（<code>types.ts:249-256</code>）：</p>
+
+<blockquote>Returns follow-up messages to process after the agent would otherwise stop.<br>
+Called when the agent has no more tool calls and no steering messages.<br>
+Use this for follow-up messages that should wait until the agent finishes.</blockquote>
+
+<table>
+<tr><th></th><th>什么时候被 drain</th><th>效果</th></tr>
+<tr><td><code>steer()</code></td><td>当前这一轮工具调用跑完之后，<strong>下一轮开始前</strong>（<code>agent-loop.ts:259</code>）</td><td>插进正在进行的运行里，提前影响接下来的走向</td></tr>
+<tr><td><code>followUp()</code></td><td>Agent 已经没有更多工具调用、且 steering 队列也空了、<strong>本来要停下来</strong>的那一刻（<code>agent-loop.ts</code> 里 <code>getFollowUpMessages</code> 调用点，在 inner while 循环退出之后）</td><td>让 Agent 多跑一轮，而不是打断正在做的事</td></tr>
+</table>
+
+<p>回到开头的场景："顺便也查一下测试文件"如果是想让 Agent 现在就调整方向，用 <code>steer()</code>；如果是想等它把当前 bug 修完之后再顺带查一下，用 <code>followUp()</code>——两个 API 名字不同，背后对应的是两种完全不同的"什么时候介入"。</p>
+
+<div class="quiz" data-answer="one-at-a-time">
+<div class="q-prompt">小测验：<code>PendingMessageQueue</code> 的默认 <code>mode</code> 字符串是什么？</div>
+<input type="text" class="q-input" placeholder="填字符串，比如 xxx-xx-x-xxxx">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>下一步的彩蛋预告</h2>
+
+<p>这节课看到消息怎么被"排队、在轮次边界被消费"，但还没看 Lesson 2 结尾提过的另一半——<code>runAgentLoop</code> 内部怎么决定一批工具调用是并行跑还是顺序跑。下一课打开 <code>harness/tools/</code>，看 <code>beforeToolCall</code>/<code>afterToolCall</code> 钩子和并行执行策略。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/agent/src/agent.ts</code>（<code>PendingMessageQueue:125-158</code>、<code>steer:283-285</code>、<code>followUp:288-290</code>、<code>prompt() 忙碌检查:351-354</code>、<code>createLoopConfig 里的默认 steeringMode:231</code>），<code>pi/packages/agent/src/agent-loop.ts</code>（首次 steering 检查 <code>:166</code>、轮次末尾的 <code>getSteeringMessages</code> 调用 <code>:259</code>），<code>pi/packages/agent/src/types.ts</code>（<code>getSteeringMessages</code> 文档 <code>:234-241</code>、<code>getFollowUpMessages</code> 文档 <code>:249-256</code>）。补充参照：<a href="https://dg-ai-notes.pages.dev/modules/ch03-agent-loop" target="_blank">Pi Agent Book 第 3 章「Agent Loop」</a>，对 steering 的两次检查点（进入循环前 + 每轮结束后）有专门讲解。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：steer 和 followUp 的区别、队列的排空策略、为什么 prompt() 忙碌时要抛错——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 7 of the pi-agent-core architecture course · <a href="../reference/0007-steering.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

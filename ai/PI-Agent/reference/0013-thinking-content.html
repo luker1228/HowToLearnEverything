@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · 思考内容（ThinkingContent）</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0013-thinking-content.html">← Lesson 13</a> · <a href="0004-context-pipeline.html">参考卡片 4：上下文管道</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>思考内容：跟文本、工具调用平级的第三种内容块</h1>
+<p class="subtitle">配套 Lesson 13。核心结论：pi 没有为"思考"发明任何专门机制，它是既有两套系统（内容类型、流式事件）里各多出的一个平级分支。</p>
+
+<h2>类型层：<code>ThinkingContent</code></h2>
+<pre>// pi-ai/src/types.ts:429
+AssistantMessage.content: (TextContent | ThinkingContent | ToolCall)[]
+
+// types.ts:356-364
+interface ThinkingContent {
+  type: "thinking";
+  thinking: string;
+  thinkingSignature?: string;  // provider 不透明回放数据，多轮续接用
+  redacted?: boolean;          // 为真时文字被安全过滤器隐去，加密凭证仍在 thinkingSignature
+}</pre>
+
+<h2>流式事件层：三组事件严格对称</h2>
+<table>
+<tr><th>事件三元组</th><th>负责的内容块</th></tr>
+<tr><td><code>text_start</code> / <code>text_delta</code> / <code>text_end</code></td><td><code>TextContent</code></td></tr>
+<tr><td><code>thinking_start</code> / <code>thinking_delta</code> / <code>thinking_end</code></td><td><code>ThinkingContent</code></td></tr>
+<tr><td><code>toolcall_start</code> / <code>toolcall_delta</code> / <code>toolcall_end</code></td><td><code>ToolCall</code></td></tr>
+</table>
+<p><code>agent-loop.ts:326-344</code> 用同一个 <code>case</code> 分支处理这九种事件——收到任意一种，只做「<code>partialMessage = event.partial</code>，转发成 <code>message_update</code>」，不区分种类。拼接碎片、认领 <code>contentIndex</code> 的工作在 provider 端完成，<code>agent-loop.ts</code> 不参与。</p>
+
+<h2>开关链路：谁决定这一轮要不要输出思考</h2>
+<pre>Agent._state.thinkingLevel        // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"，默认 "off"
+  → config.reasoning              // agent.ts:450，"off" → undefined
+    → streamFunction(model, ctx, { ...config, apiKey, signal })   // agent-loop.ts:308，整个 config 展开进 provider 调用</pre>
+<p><code>reasoning</code> 落地成具体 provider 参数（如 token 预算）是 <code>pi-ai</code> 内部的事，按 Mission 范围不展开。<code>ThinkingBudgets</code>（等级→token 预算的映射）同样来自 <code>pi-ai</code>，agent 包只是原样传递等级。</p>
+
+<h2>为什么需要 <code>thinkingSignature</code>/<code>redacted</code></h2>
+<p>某些 provider 的多轮推理要求原样回放上一轮的思考块，否则推理链条失效——<code>thinkingSignature</code> 就是为此保留的不透明凭证。<code>redacted</code> 处理"文字被隐去但凭证仍需保留"的情况。含义：<code>AgentMessage</code> 轨迹（<a href="0004-context-pipeline.html">参考卡片 4</a>）里带 <code>ThinkingContent</code> 的消息不能被随意摘要/改写，否则可能丢掉这个凭证——具体压缩逻辑（<a href="0005-context-compaction.html">参考卡片 5</a>）对此的处理方式，留作后续追问点，本卡暂未验证。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/ai/src/types.ts</code>：<code>ThinkingContent:356-364</code>、<code>AssistantMessage.content:429</code>、<code>AssistantMessageEvent:535-551</code></li>
+<li><code>pi/packages/agent/src/agent-loop.ts</code>：<code>streamAssistantResponse:281-372</code>（事件 switch：326-344）</li>
+<li><code>pi/packages/agent/src/types.ts</code>：<code>ThinkingLevel:300</code></li>
+<li><code>pi/packages/agent/src/agent.ts</code>：<code>thinkingLevel</code> 默认值:77、<code>reasoning</code> 映射:450、<code>thinkingBudgets</code>:208/234/455</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 13 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

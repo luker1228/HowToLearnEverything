@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 13 · 模型的"思考过程"是怎么实现的</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0012-memory-vs-rag.html">← Lesson 12</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0013-thinking-content.html">参考卡片：思考内容 →</a></div>
+
+<p class="kicker">Lesson 13 · types.ts + agent-loop.ts</p>
+<h1>模型的"思考过程"是怎么实现的</h1>
+<p class="subtitle">你在 UI 里看到模型回复前有一段"思考"文字，会好奇这是不是又发明了一套特殊消息类型、需要单独处理。答案恰恰相反——这节课看它怎么"平凡"地嵌进你已经学过的两套机制（<a href="0004-context-pipeline.html">Lesson 4</a> 的消息内容类型、<a href="0001-agent-big-picture.html">Lesson 1</a> 的流式事件）里，没有另开一条路。</p>
+
+<h2>1. 问题：Lesson 1 学过的事件序列里，有没有"思考"的位置？</h2>
+
+<p>Lesson 1 讲过一条 assistant 消息流式生成时会发一串 <code>message_start → message_update* → message_end</code>。<code>message_update</code> 具体带什么内容，当时没细看。现在的问题是：如果这条消息里既有"思考文字"又有"最终回答文字"，<code>agent-loop.ts</code> 是不是要单独判断"这段是思考、那段是正文"，分别走两条不同的处理逻辑？</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>agent-loop.ts</code> 里处理流式事件的那段 <code>switch</code>，有没有为"思考"单独写一个 <code>case</code> 分支或者一段特殊逻辑？</div>
+<div class="q-options">
+<button class="q-option">有，专门写了一个 <code>handleThinkingDelta</code> 函数</button>
+<button class="q-option" data-correct="true">没有——处理"思考"事件的代码和处理"正文文本"事件的代码是完全同一段，<code>agent-loop.ts</code> 里不存在任何为 thinking 单独写的分支</button>
+<button class="q-option">有，交给一个独立的 <code>ThinkingStream</code> 类处理</button>
+<button class="q-option">有，由 <code>harness</code> 层的一个专用钩子决定怎么处理</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>2. 类型层：<code>ThinkingContent</code> 是第三种内容块，跟文本、工具调用平级</h2>
+
+<p><code>AssistantMessage.content</code> 的类型（<code>@earendil-works/pi-ai</code> 的 <code>types.ts:429</code>）是 <code>(TextContent | ThinkingContent | ToolCall)[]</code>——一条 assistant 消息内部本来就是一个数组，可以按顺序混排"一段思考 + 一段正文 + 一次工具调用"。<code>ThinkingContent</code>（<code>types.ts:356-364</code>）：</p>
+
+<pre>export interface ThinkingContent {
+	type: "thinking";
+	thinking: string;
+	thinkingSignature?: string; // provider 特定的不透明回放数据，用于多轮续接
+	redacted?: boolean;         // 为真时思考内容被安全过滤器隐去，
+	                             // 加密后的原始数据仍保留在 thinkingSignature 里
+}</pre>
+
+<p>它跟 <code>TextContent</code>（<code>{ type: "text", text }</code>）结构几乎一样，只是换了个 <code>type</code> 标签。从类型系统的角度看，"思考"从来不是一种特殊机制，只是内容数组里又多了一种 <code>type</code>。</p>
+
+<h2>3. 流式事件层：三组事件严格对称，<code>agent-loop.ts</code> 一视同仁</h2>
+
+<p>流式协议定义在 <code>pi-ai</code> 的 <code>AssistantMessageEvent</code>（<code>types.ts:535-545</code>），<code>text_*</code>、<code>thinking_*</code>、<code>toolcall_*</code> 三组事件结构完全对称：</p>
+
+<pre>| { type: "text_start";     contentIndex: number; partial: AssistantMessage }
+| { type: "text_delta";     contentIndex: number; delta: string; partial: AssistantMessage }
+| { type: "text_end";       contentIndex: number; content: string; partial: AssistantMessage }
+| { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+| { type: "thinking_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+| { type: "thinking_end";   contentIndex: number; content: string; partial: AssistantMessage }
+| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
+| { type: "toolcall_end";   contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }</pre>
+
+<p><code>agent-loop.ts:326-344</code> 处理这九种事件用的是<strong>同一个 case 分支</strong>：</p>
+
+<pre>case "text_start": case "text_delta": case "text_end":
+case "thinking_start": case "thinking_delta": case "thinking_end":
+case "toolcall_start": case "toolcall_delta": case "toolcall_end":
+	if (partialMessage) {
+		partialMessage = event.partial;
+		context.messages[context.messages.length - 1] = partialMessage;
+		await emit({ type: "message_update", assistantMessageEvent: event, message: { ...partialMessage } });
+	}
+	break;</pre>
+
+<p>这九种事件收到哪一种，都只做同一件事：把 <code>partialMessage</code> 换成 provider 给的最新快照，原样转发成一条 <code>message_update</code>。<code>contentIndex</code> 负责标出这段 delta 属于 <code>content</code> 数组里第几块——真正把碎片拼回完整 <code>ThinkingContent</code>/<code>TextContent</code> 的工作，是 provider 端在构造 <code>partial</code> 时做的，<code>agent-loop.ts</code> 本身不关心、也不需要知道"这一块是不是思考"。</p>
+
+<h2>4. 谁按下"开始思考"这个开关</h2>
+
+<p>光有类型和事件协议，不代表模型真的会输出 <code>thinking</code> 块——这取决于请求时有没有打开推理。链路是：</p>
+
+<pre>Agent._state.thinkingLevel   // "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"（types.ts:300），默认 "off"（agent.ts:77）
+  → AgentLoopConfig.reasoning  // "off" 时传 undefined（agent.ts:450）
+    → streamFunction(model, llmContext, { ...config, apiKey, signal })  // 整个 config 被展开进 provider 调用的 options（agent-loop.ts:308）</pre>
+
+<p><code>reasoning</code> 具体怎么变成某个 provider 能听懂的参数（比如 Anthropic 的 thinking token 预算），是 <code>pi-ai</code> 内部的事——按 Mission 的范围约定，这一层不展开；只需要知道 <code>ThinkingBudgets</code>（<code>agent.ts</code> 里的 <code>thinkingBudgets</code> 字段）这个"等级 → 具体 token 预算"的映射表也来自 <code>pi-ai</code>，agent 包只负责把用户设置的等级原样传下去。</p>
+
+<h2>5. <code>thinkingSignature</code>/<code>redacted</code> 为什么存在：思考不能被随意改写</h2>
+
+<p>回想 <a href="0004-context-pipeline.html">Lesson 4</a> 讲过 <code>AgentMessage</code> 是贯穿始终的轨迹——如果历史里有一条带 <code>ThinkingContent</code> 的 assistant 消息，下一轮请求要不要原样把它送回去？某些 provider 的多轮推理要求<strong>必须</strong>原样送回上一轮的思考块，否则推理链条失效；<code>thinkingSignature</code> 就是为这种"必须原样回放"场景准备的不透明凭证，<code>redacted</code> 则处理"思考内容被安全过滤器隐去，但加密后的凭证还留着"这种情况——文字看不到，但回放凭证还能用。这跟 <a href="0005-context-compaction.html">Lesson 5</a> 的压缩形成一个值得留意的张力：文本消息可以被摘要替换，但带 <code>thinkingSignature</code> 的思考块一旦被摘要抹掉，这个凭证也就没了——具体 pi 的压缩逻辑对这类消息是怎么处理的，是下一个值得追问的问题。</p>
+
+<h2>回答你的问题</h2>
+
+<p>"思考过程"不是单独发明的机制，是<strong>已有两套机制上各多长出一个平级分支</strong>：内容类型上，<code>ThinkingContent</code> 是 <code>content</code> 数组里跟 <code>TextContent</code>/<code>ToolCall</code> 平级的第三种块；流式协议上，<code>thinking_start/delta/end</code> 是跟 <code>text_*</code>/<code>toolcall_*</code> 结构对称的第三组事件，<code>agent-loop.ts</code> 用同一段代码处理，完全不区分。真正决定"这一轮模型要不要输出思考"的开关是 <code>Agent.thinkingLevel</code>，一路原样传到 provider 调用的 options 里，具体怎么落地是 <code>pi-ai</code> 的事。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/ai/src/types.ts</code>（<code>ThinkingContent:356-364</code>、<code>AssistantMessage.content:429</code>、<code>AssistantMessageEvent:535-551</code>），<code>pi/packages/agent/src/agent-loop.ts</code>（<code>streamAssistantResponse:281-372</code>，事件 switch：326-344），<code>pi/packages/agent/src/types.ts</code>（<code>ThinkingLevel:300</code>），<code>pi/packages/agent/src/agent.ts</code>（<code>thinkingLevel</code> 默认值:77，<code>reasoning</code> 映射:450，<code>thinkingBudgets</code>:208/234/455）。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：压缩（Lesson 5）遇到带 <code>thinkingSignature</code> 的消息会怎么处理、不同 provider 的 <code>reasoning</code> 语义差多远——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 13 of the pi-agent-core architecture course · <a href="../reference/0013-thinking-content.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

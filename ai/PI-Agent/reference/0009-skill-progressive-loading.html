@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · Skill 渐进式加载</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0009-skill-progressive-loading.html">← Lesson 9</a> · <a href="0008-tool-permission-and-skill.html">参考卡片 8：权限控制与 Skill</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>Skill 怎么被渐进式加载，谁来决定用哪些</h1>
+<p class="subtitle">配套 Lesson 9。可打印，随时回来查。范围注意：本课主要引用 <code>packages/coding-agent</code>，不是之前几课的 <code>packages/agent</code>——因为 <code>packages/agent</code> 里对应的整合逻辑（<code>AgentHarness.skill()</code>）是空实现（<code>agent-harness.ts:368-370</code>）。</p>
+
+<h2>三个阶段（Agent Skills 规范「Progressive disclosure」原文定义）</h2>
+<table>
+<tr><th>阶段</th><th>内容</th><th>触发/重建时机</th></tr>
+<tr><td>1 · Metadata（~100 tokens）</td><td><code>name</code>/<code>description</code>/<code>location</code>（<code>&lt;available_skills&gt;</code>），过滤掉 <code>disableModelInvocation=true</code> 的</td><td>会话开始、工具集变化（<code>agent-session.ts:944-953</code>）、扩展资源变化（<code>:2407-2409</code>）时重建，缓存进 <code>_baseSystemPrompt</code>，<strong>不逐轮重算</strong>；进的是 <code>systemPrompt</code>，不是 <code>messages</code></td></tr>
+<tr><td>2 · Instructions（&lt;5000 tokens 建议）</td><td>完整 SKILL.md 正文，包进 <code>&lt;skill name=... location=...&gt;...&lt;/skill&gt;</code></td><td>见下方两条路径；进的是 <code>messages</code>，不是 <code>systemPrompt</code></td></tr>
+<tr><td>3 · Resources（按需）</td><td><code>scripts/</code>/<code>references/</code>/<code>assets/</code> 里的具体文件</td><td>模型判断 Instructions 正文里提到的某份资料/脚本真正用得上时，再发起一次普通 <code>read</code>/<code>bash</code>；可能永远不发生</td></tr>
+</table>
+
+<pre>扫描磁盘 → 提取 name+description(+location)
+        → 拼进 systemPrompt          ═══ Stage 1 Metadata
+        → 每次模型调用原样带上
+        → 模型判断 description 相关？
+            ├─ 否 → 结束
+            └─ 是 → 路径 B（模型 read）或路径 A（用户 /skill:name）
+                 → SKILL.md 全文进 messages   ═══ Stage 2 Instructions
+                     → 正文引用 scripts/references/assets？
+                         → 模型按需再 read/bash  ═══ Stage 3 Resources</pre>
+
+<h2>Stage 1 → Stage 2 的两条路径：模型自主发现为主，人工强制为兜底</h2>
+<p><code>coding-agent/docs/skills.md</code>「How Skills Work」原文：「When a task matches, the agent uses <code>read</code> to load the full SKILL.md (models don't always do this; use prompting or <code>/skill:name</code> to force it）」——这句话定了主次关系，不是猜的。</p>
+<table>
+<tr><th></th><th>决策者</th><th>时机</th><th>机制</th><th>定位</th></tr>
+<tr><td>路径 B：模型主动读</td><td>模型</td><td>模型调用<strong>过程中</strong></td><td>系统提示词原文（<code>skills.ts:364</code>）："Use the read tool to load a skill's file..."——模型发起一次普通 <code>read</code> 工具调用，照常经过 Lesson 8 的 <code>beforeToolCall</code>/事件链路，无特殊待遇</td><td><strong>规范描述的默认设计</strong></td></tr>
+<tr><td>路径 A：<code>/skill:name</code></td><td>用户（打字时就已决定）</td><td>模型调用<strong>开始之前</strong></td><td><code>_expandSkillCommand</code>（<code>agent-session.ts:1320-1341</code>）同步 <code>readFileSync</code>，拼进消息文本；调用点在 <code>:1169-1174</code>，发给 agent 之前</td><td>模型没自主发现时的<strong>可靠性兜底</strong></td></tr>
+</table>
+<p><strong>关键点</strong>：路径 A 不查 <code>disableModelInvocation</code>——这个标记只影响 Stage 1 列表里"看不看得见"，不影响"能不能被显式点名调用"。</p>
+
+<h2>另一种设计：专门的 <code>load_skill(name)</code> 工具（对照，不是 pi 的做法）</h2>
+<p><a href="https://learn.shareai.run/zh/s07/" target="_blank">Learn Claude Code</a> 教程和这次对话里实际可调用的 <code>Skill</code> 工具，用的是同一个模式：按<strong>名字</strong>查注册表，不接受任意文件路径。</p>
+<table>
+<tr><th></th><th>pi：通用 <code>read</code> + 路径</th><th><code>load_skill(name)</code> + 注册表</th></tr>
+<tr><td>安全边界</td><td>路径就是路径，全靠 <code>beforeToolCall</code> 自己判断</td><td>不接受任意路径，天然没有路径遍历风险</td></tr>
+<tr><td>权限钩子看到的信息</td><td>看到的是"要读某个路径"，跟读别的文件长得一样</td><td>能看到"这是一次 skill 调用"这个明确语义</td></tr>
+</table>
+<p>两种都真实存在，规范只规定效果（渐进式加载），不规定具体触发机制。</p>
+
+<h2>"用哪些 Skill"没有智能筛选，靠的是 description 写得够不够具体</h2>
+<p>Stage 1 列表永远是全部（未禁用的）已发现 Skill，不按当前 prompt 做相关性排序/检索。路径 B 里模型要不要读某个 Skill，完全靠它自己读 <code>description</code> 文本判断——这也是规范强调"description 要写具体"的原因（<code>Helps with PDFs.</code> 被明确标成 Poor 示例）。</p>
+
+<h2>发现来源：不只是两个目录</h2>
+<table>
+<tr><th>层级</th><th>来源</th></tr>
+<tr><td>全局</td><td><code>~/.pi/agent/skills/</code>、<code>~/.agents/skills/</code></td></tr>
+<tr><td>项目（<strong>要先信任这个项目</strong>）</td><td><code>.pi/skills/</code>、<code>.agents/skills/</code>（从 cwd 往上找到 git 根）</td></tr>
+<tr><td>包 / 配置</td><td><code>package.json</code> 的 <code>pi.skills</code>、<code>settings.json</code> 的 <code>skills</code> 数组、<code>--skill &lt;path&gt;</code></td></tr>
+</table>
+<p><code>loadSkills</code>（<code>coding-agent/src/core/skills.ts:407-456</code>）是 coding-agent 自己独立维护的一套扫描逻辑，跟 <code>packages/agent/src/harness/skills.ts</code> 的 <code>loadSkills</code> 是两份分开的实现，不是互相调用关系。"项目级 Skill 要先信任项目"跟 Lesson 8 的权限控制是同一类问题的另一面——留给以后专门看 <code>trust-manager.ts</code>。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/coding-agent/docs/skills.md</code>：「How Skills Work」「Locations」「Description Best Practices」——本课"谁来决定"的结论直接来自这份文档，不是代码反推的猜测</li>
+<li><code>pi/packages/coding-agent/src/core/agent-session.ts</code>：<code>_expandSkillCommand:1320-1341</code>、调用点 <code>:1169-1174</code>、<code>_rebuildSystemPrompt:1034-1067</code>、触发点 <code>:944-953</code>、<code>:2407-2409</code></li>
+<li><code>pi/packages/coding-agent/src/core/skills.ts</code>：<code>formatSkillsForPrompt:355-370</code>、<code>loadSkills:407-456</code></li>
+<li>对照：<code>pi/packages/agent/src/harness/agent-harness.ts</code>（<code>skill() 空实现:368-370</code>）、<code>pi/packages/agent/src/harness/skills.ts</code>（Lesson 8 的独立实现）</li>
+<li>补充：<a href="https://agentskills.io/specification" target="_blank">Agent Skills 规范</a>（三阶段定义原文出处）、<a href="https://agentskills.io/integrate-skills" target="_blank">集成指南</a></li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 9 · pi-agent-core / coding-agent architecture course</footer>
+
+</body>
+</html>

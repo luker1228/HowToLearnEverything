@@ -30,6 +30,7 @@
 <tr><td>④ 执行</td><td><code>tool.execute(id, args, signal, onUpdate)</code></td><td>—</td><td>抛异常 → 捕获成报错结果</td></tr>
 <tr><td>⑤ 事后验证</td><td><code>config.afterToolCall</code></td><td>可选钩子</td><td>可改写 <code>content</code>/<code>details</code>/<code>usage</code>/<code>isError</code>/<code>terminate</code></td></tr>
 </table>
+<p>这张表讲的是<strong>单个</strong> toolCall 内部的五道关。一条 assistant 消息里<strong>一批</strong> toolCall 之间怎么调度（顺序 vs 并行、事件顺序和消息顺序为什么会不一样）——见 <a href="0011-parallel-tool-execution.html">参考卡片 11</a>。</p>
 
 <h2>核心设计原则：拒绝 = 一种工具失败</h2>
 <p>《深入理解 AI Agent》第四章：「审批失败后不应简单重试，而应<strong>将拒绝理由作为工具调用结果加入 Agent 的轨迹</strong>」。代码实现：<code>beforeToolCall</code> 的 <code>block</code> 走 <code>createErrorToolResult(reason)</code>，和工具真正抛异常时完全同一条路径——不需要给"被拒绝"单独发明一套处理逻辑，Agent 已经会处理"工具失败"了。</p>
@@ -40,6 +41,25 @@
 <tr><td><code>beforeToolCall</code></td><td>执行前</td><td>放行 / 拦截（二选一）</td><td>事前审批</td></tr>
 <tr><td><code>afterToolCall</code></td><td>执行后</td><td>改写结果的任意字段，包括把成功改判为失败</td><td>事后验证</td></tr>
 </table>
+
+<h2>拆解②：prepareArguments 与 validateToolArguments 各管什么</h2>
+<table>
+<tr><th></th><th>层级</th><th>性质</th><th>不合格时</th></tr>
+<tr><td><code>prepareArguments</code></td><td>单个工具可选的钩子（<code>types.ts:393</code>）</td><td>纯函数、幂等；只修「意图无歧义但形状不对」的已知情况</td><td>不处理 → 原样透传，仍要过下一关</td></tr>
+<tr><td><code>validateToolArguments</code></td><td><code>@earendil-works/pi-ai</code> 里每个工具必经的通用校验（<code>packages/ai/src/utils/validation.ts:317</code>）</td><td>按 TypeBox schema 做类型 Convert/coerce，再严格 <code>Check</code></td><td>抛错 → 变成 <code>isError:true</code> 的工具结果，<strong>不会被 prepareArguments 绕过</strong></td></tr>
+</table>
+<p><code>prepareArguments</code> 不是"放宽校验换来的兼容层"，而是在校验之前把已知的错误形状搬正，让校验层永远只认一种当前 schema 期望的标准形状——不需要同时认识历史上所有旧形状。</p>
+
+<p><strong>真实案例（<code>harness/tools/edit.ts:55-77</code> 的 <code>prepareEditArguments</code>）——两类完全不同的动机：</strong></p>
+<ul>
+<li><strong>模型序列化怪癖</strong>：<code>edits</code> 被传成 JSON 字符串而不是数组 → <code>JSON.parse</code> 还原。</li>
+<li><strong>schema 版本演进</strong>：Edit 工具早期是扁平的单个 <code>{oldText, newText}</code>，后来才升级成批量的 <code>edits[]</code>；旧形状自动搬进 <code>edits</code> 数组。</li>
+</ul>
+<p>第二类跟"哪个模型"无关，纯粹是 pi 自己的 schema 改版问题。<code>CHANGELOG.md:372</code> 给出的原始动机正是这一类：「enabling compatibility shims for <strong>resumed sessions with outdated tool schemas</strong>」——会话恢复时 schema 本身已经改版，而不是"不同模型 API 序列化差异"。外部教程（dg-ai-notes ch05）只讲了第一类，容易让人误以为这个 hook 的设计动机就是"模型差异兼容层"。</p>
+
+<p>设计原则（<code>docs/harness.md:2675</code>）：「<code>AgentTool.prepareArguments</code> is deterministic/idempotent computation... effectful policy belongs in <code>before_tool</code>」——形状修复、硬校验、权限策略是三层不同职责，故意不揉在一起。</p>
+
+<p><strong>这个回调点是通用的，不是 Edit 专属补丁：</strong>类型定义在每个工具都有（<code>types.ts:393</code>），甚至暴露给第三方扩展开发者——<code>coding-agent/core/extensions/types.ts:467</code> 的官方注释直接写「Optional compatibility shim to prepare raw tool call arguments before schema validation」。目前整个仓库里唯一真正用它的是 Edit 工具（<code>packages/agent</code> 和 <code>packages/coding-agent</code> 各有一份 <code>prepareEditArguments</code>）。coding-agent 那份的源码注释直接点名了真实模型：「Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array.」——证实模型序列化怪癖不是假设，是观察到的真实现象。</p>
 
 <h2>terminate 彩蛋：工具让循环自然停下</h2>
 <pre>function shouldTerminateToolBatch(finalizedCalls) {

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 12 · pi 的"记忆"到底在哪一层，RAG/向量数据库什么时候才需要</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0011-parallel-tool-execution.html">← Lesson 11</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0012-memory-vs-rag.html">参考卡片：记忆分层 →</a></div>
+
+<p class="kicker">Lesson 12 · pi-agent-core 的边界 + ai-agent-book 第三章</p>
+<h1>pi 的"记忆"到底在哪一层，RAG/向量数据库什么时候才需要</h1>
+<p class="subtitle">先说一句：你上次问的 dg-ai-notes M06 消息系统，内容已经被 <a href="0004-context-pipeline.html">Lesson 4</a> 覆盖过了（<code>AgentMessage</code> 两层设计、<code>convertToLlm</code>、<code>excludeFromContext</code>），不用重开一课。但你问"记忆需要上 RAG 吗"这个问题，指向一个真正还没打开过的空白——这节课打开它。</p>
+
+<h2>1. 问题：Lesson 4/5/10 讲的"上下文"和"记忆"，是不是同一件事？</h2>
+
+<p><code>ai-agent-book</code> 第三章开篇把这件事说得很明确：「上一章解决的是单次交互的上下文管理。这一章要处理一个更难的问题：如何让 Agent 在对话结束后仍然记住用户、记住知识。」也就是说，理论上"记忆"至少要分两层：<strong>轨迹（Trajectory）</strong>——当前这次交互的完整历史；<strong>用户长期记忆</strong>——跨会话、经过提炼的稳定事实。你已经学过 pi 怎么处理轨迹（<a href="0004-context-pipeline.html">Lesson 4</a> 的 <code>AgentMessage[]</code>、<a href="0005-context-compaction.html">Lesson 5</a> 的压缩、<a href="0010-session-tree.html">Lesson 10</a> 的会话文件树）。问题是：pi 有没有第二层？</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>pi-agent-core</code> / <code>coding-agent</code> 有没有实现"跨会话的用户长期记忆"——不是保存对话原文，而是从多次会话里提炼出来、持久化存着的用户偏好/事实（比如"这个用户是素食者"）？</div>
+<div class="q-options">
+<button class="q-option">有，存在专门的 SQLite 表里</button>
+<button class="q-option" data-correct="true">没有——pi 目前只有"轨迹"这一层（完整会话历史，可压缩、可 fork），没有独立的"提炼后的跨会话记忆"层</button>
+<button class="q-option">有，通过一个内置的 <code>memory_search</code> 工具调用向量数据库</button>
+<button class="q-option">有，但只在 <code>coding-agent</code> 的企业版配置里开启</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>2. 验证：整个仓库搜不到向量检索的痕迹</h2>
+
+<pre>grep -rli "embedding\|vector\|rag\|semantic search" pi/packages/*/src
+→ 只有一处：rpc-mode.ts:4 的注释「Used for embedding the agent in other applications」
+   （这个"embedding"是"把 Agent 嵌入到别的应用里"的日常英语用法，跟 ML 的向量嵌入无关）</pre>
+
+<p>零命中。pi 现在关于"记忆"的全部实现，就是你已经学过的三样：<code>AgentMessage[]</code> 轨迹（Lesson 4）、<code>createCompactionSummaryMessage</code> 摘要替换（Lesson 5）、<code>SessionEntry</code>/<code>fork()</code> 持久化与分叉（Lesson 10）。全部工作在<strong>轨迹</strong>这一层，没有一行代码涉及"把海量历史提炼、索引、检索"——也就是第三章说的"用户长期记忆"和"知识库"，pi 完全没做。这跟 <a href="../reference/0011-parallel-tool-execution.html">Lesson 11</a> 发现 <code>executionMode: "sequential"</code> 没人用、<a href="0009-skill-progressive-loading.html">Lesson 9</a> 发现 <code>skill()</code> 是空壳，是同一件事的另一种表现——只是这次不是"钩子造好没人用"，而是"这一整层功能压根没被造"。<code>RESOURCES.md</code> 之前把 Ch3 粗略映射到 <code>harness/session</code>，这个映射不够精确，已经改过来。</p>
+
+<h2>3. 那什么时候才需要 RAG / 向量数据库</h2>
+
+<p>第三章给出的判断标准不是"要不要记忆"，而是：<strong>记忆/知识的体量是否超出了能直接塞进一次上下文窗口的规模</strong>。具体两个场景：</p>
+
+<table>
+<tr><th>场景</th><th>为什么直接塞进 context 不够</th><th>需要什么</th></tr>
+<tr><td>共享知识库（公司政策、法规、技术手册）</td><td>体量大、独立于任何一次对话存在、要被任意多次会话检索</td><td>分块 → 稠密/稀疏检索 → 融合 → 重排序（第三章"RAG 基础"一节的标准管线）</td></tr>
+<tr><td>用户长期记忆积累到"成千上万条"事实</td><td>不可能每次对话都把全部历史原文塞进 context</td><td>先提炼成 Simple Notes/JSON Cards 这类紧凑格式，再检索出"当前相关的那几条"</td></tr>
+</table>
+
+<p><strong>反过来，不需要 RAG 的场景</strong>：记忆体量小、能整个放进 context（第三章"记忆的层次结构"一节：关键且少量的事实用 JSON Cards 直接常驻），或者像 pi 现在这样——只处理<strong>单次会话内</strong>的上下文，历史太长就整体压缩（Lesson 5），不需要"从几千条里挑出相关的几条"这个检索问题。这也是为什么 pi 现在不需要向量数据库：它还没做到"需要检索"的那个规模。</p>
+
+<h2>4. 落回 Mission 的公式：RAG 不是第四个要素</h2>
+
+<p>Mission 里反复用到的公式是「Agent = LLM + 上下文 + 工具」。RAG 不是给这个公式加一个新变量——它是"知识库"通过一次<strong>工具调用</strong>（检索）把结果注入<strong>上下文</strong>的具体机制，本质上还是"工具 + 上下文"这两个既有要素的组合，只是知识库大到必须靠检索而不能整篇塞进去。第三章后半段讲的"智能体化 RAG"更直接：检索本身就是模型可以在 ReAct 循环里主动调用的一个工具（<code>knowledge_base_search</code>），跟 <a href="0003-tool-call-lifecycle.html">Lesson 3</a> 讲的工具调用生命周期是同一套机制，不是另一套单独的架构。</p>
+
+<h2>回答你的问题</h2>
+
+<p>ch06-messages 不用重开课，已经在 Lesson 4 里学过了。至于"记忆要不要上 RAG"：<strong>pi-agent-core 目前完全没有这个问题</strong>，因为它只做"轨迹管理"（当前会话的历史，可压缩可分叉），没有做"跨会话提炼记忆"或"知识库"这一层——这一层如果要做，才会遇到"记忆多到塞不进 context，需要检索"的问题，才需要 RAG/向量数据库。一般判断标准就是体量：能整篇放进上下文就不需要，多到必须"挑出相关的那几条"才需要。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>ai-agent-book/book/chapter3.md</code>（"用户记忆系统"、"记忆的层次结构"、"RAG 基础"、"智能体化 RAG"），<code>chapter1.md</code>（"Agent = LLM + 上下文 + 工具"公式）。代码侧验证：全仓库 <code>grep -rli "embedding\|vector\|rag"</code> 结果为空（除 <code>coding-agent/src/modes/rpc/rpc-mode.ts:4</code> 一处无关用法）；对照 <a href="0004-context-pipeline.html">Lesson 4</a>、<a href="0005-context-compaction.html">Lesson 5</a>、<a href="0010-session-tree.html">Lesson 10</a> 已覆盖的"轨迹"层实现。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：什么时候值得给 pi 加一层用户长期记忆、加了之后该用第三章哪种存储格式——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码/书里的框架验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 12 of the pi-agent-core architecture course · <a href="../reference/0012-memory-vs-rag.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

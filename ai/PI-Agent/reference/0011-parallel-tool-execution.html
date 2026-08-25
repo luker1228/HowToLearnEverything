@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考卡片 · 并行工具执行</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  body { font-size: 17px; }
+  @media print {
+    .nav, footer.lesson-footer { display: none; }
+    body { padding: 0.5in; max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="../lessons/0011-parallel-tool-execution.html">← Lesson 11</a> · <a href="0003-tool-call-lifecycle.html">参考卡片 3：工具调用生命周期</a></div>
+
+<p class="kicker">参考卡片 · Reference</p>
+<h1>并行执行工具调用：真并行 vs 假顺序</h1>
+<p class="subtitle">配套 Lesson 11。承接参考卡片 3「拆解②」——那张卡讲的是单个 toolCall 内部怎么校验参数，这张卡讲一批 toolCall 之间的执行策略。</p>
+
+<h2>调度决策：谁能强制这一批走 sequential</h2>
+<pre>// agent-loop.ts:419-425
+const hasSequentialToolCall = toolCalls.some(
+  tc => currentContext.tools?.find(t => t.name === tc.name)?.executionMode === "sequential",
+);
+if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+  return executeToolCallsSequential(...);
+}
+return executeToolCallsParallel(...);</pre>
+<p>两个开关任一为真，整批（不只是那一个工具）强制顺序：<code>config.toolExecution</code>（Agent 级别整体配置，<code>agent.ts:237</code> 默认值是 <code>"parallel"</code>）或<strong>这一批里任何一个</strong> toolCall 命中的工具声明了 <code>executionMode: "sequential"</code>（<code>types.ts:403-409</code>）。目前 <code>packages/agent</code> 和 <code>packages/coding-agent</code> 的内置工具没有一个真的用了后者——是留给未来工具/第三方扩展（<code>coding-agent/core/extensions/types.ts:467-473</code> 同一字段暴露出去）的钩子。</p>
+
+<h2>"parallel"内部的真实分工</h2>
+<table>
+<tr><th>阶段</th><th>函数</th><th>是否并发</th></tr>
+<tr><td>找工具 / prepareArguments / validateToolArguments / beforeToolCall</td><td><code>prepareToolCall</code></td><td><strong>否</strong>——<code>for</code> 循环里逐个 <code>await</code>，按 toolCall 原始顺序排队</td></tr>
+<tr><td><code>tool.execute()</code> + <code>afterToolCall</code></td><td>塞进闭包，最后 <code>Promise.all</code></td><td><strong>是</strong>——这才是真正并发的部分</td></tr>
+</table>
+<p>官方注释原文（<code>types.ts:34-41</code>）：「tool calls are prepared sequentially, then allowed tools execute concurrently. <code>tool_execution_end</code> is emitted in tool completion order after each tool is finalized, while tool-result message artifacts are emitted later in assistant source order.」</p>
+
+<h2>两种"顺序"不要混淆</h2>
+<table>
+<tr><th></th><th>顺序依据</th><th>可能乱序吗</th></tr>
+<tr><td><code>tool_execution_end</code> 事件流</td><td>真实完成时间</td><td>会——谁先跑完谁先发</td></tr>
+<tr><td>喂回 LLM 的 <code>ToolResultMessage[]</code></td><td>模型发出 toolCall 的原始顺序（<code>orderedFinalizedCalls</code>，<code>agent-loop.ts:540-548</code>）</td><td>不会——<code>Promise.all</code> 按输入数组顺序返回，与 resolve 快慢无关</td></tr>
+</table>
+
+<h2>为什么 prepare 阶段要设计成顺序</h2>
+<p>直接后果：<code>beforeToolCall</code>（Lesson 8 的权限审批钩子）永远按模型调用顺序一个一个问，不会出现"同一批里三个权限弹窗同时弹出"的情况——因为权限检查就在这个顺序的 <code>prepareToolCall</code> 里面，跟真正耗时的 <code>tool.execute()</code> 是分开的两步。</p>
+
+<h2>一手来源</h2>
+<ul>
+<li><code>pi/packages/agent/src/agent-loop.ts</code>：<code>executeToolCalls:411-426</code>、<code>executeToolCallsSequential:433-487</code>、<code>executeToolCallsParallel:489-554</code>、<code>prepareToolCall:600-651</code></li>
+<li><code>pi/packages/agent/src/types.ts</code>：<code>ToolExecutionMode:34-42</code>、<code>AgentTool.executionMode:403-409</code></li>
+<li><code>pi/packages/agent/src/agent.ts:237</code>（默认值 <code>"parallel"</code>）、<code>src/harness/agent-harness.ts:258</code></li>
+<li><code>pi/packages/coding-agent/src/core/extensions/types.ts:467-473</code>（同一字段暴露给第三方扩展）</li>
+</ul>
+
+<footer class="lesson-footer">配套 Lesson 11 · pi-agent-core architecture course</footer>
+
+</body>
+</html>

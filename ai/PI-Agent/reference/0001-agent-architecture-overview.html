@@ -36,7 +36,7 @@
 <table>
 <tr><th>文件</th><th>角色</th></tr>
 <tr><td><code>src/agent.ts</code></td><td>有状态外壳：持有 state、订阅者列表、steering/follow-up 队列；把事件 reduce 成新状态</td></tr>
-<tr><td><code>src/agent-loop.ts</code></td><td>无状态的循环引擎：<code>runAgentLoop</code> / <code>runAgentLoopContinue</code>，每轮决定调 LLM、跑工具、还是停下</td></tr>
+<tr><td><code>src/agent-loop.ts</code></td><td>无状态的纯函数模块：<code>runAgentLoop</code> / <code>runAgentLoopContinue</code>，每轮决定调 LLM、跑工具、还是停下</td></tr>
 <tr><td><code>src/types.ts</code></td><td>所有核心类型：<code>AgentMessage</code>、<code>AgentEvent</code>、<code>AgentTool</code>、<code>AgentState</code></td></tr>
 <tr><td><code>src/stream-fn.ts</code></td><td>默认的 LLM 调用函数（可被构造函数的 <code>streamFn</code> 覆盖）</td></tr>
 <tr><td><code>src/harness/tools/</code></td><td>工具相关的运行时支持</td></tr>

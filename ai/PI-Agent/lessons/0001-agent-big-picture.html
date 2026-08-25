@@ -66,11 +66,11 @@
 <ul>
 <li>持有当前状态：<code>messages</code>、<code>tools</code>、<code>model</code>、<code>isStreaming</code>、<code>streamingMessage</code>、<code>pendingToolCalls</code>……</li>
 <li>把真正的推理-工具循环委托给 <code>runAgentLoop()</code>（定义在 <code>agent-loop.ts</code>，是一个不持有状态的纯函数）</li>
-<li>用一个 <code>processEvents(event)</code> 方法，把循环发出的每个事件<strong>归约（reduce）</strong>成新的状态——这其实是一个 reducer 模式，很像 Redux 的 <code>reducer(state, action) → state</code></li>
+<li>用一个 <code>processEvents(event)</code> 方法，把循环发出的每个事件<strong>归约（reduce）</strong>成新的状态——每处理完一个事件，就把结果写回 <code>this._state</code> 上对应的字段</li>
 <li>再把事件转发给所有 <code>subscribe()</code> 的监听者，供 UI 更新</li>
 </ul>
 
-<p>换句话说：<strong><code>agent-loop.ts</code> 是引擎，<code>Agent</code> 是仪表盘 + 油箱</strong>。引擎本身不记得任何东西，每次调用都要把当前状态完整传进去（<code>createContextSnapshot()</code>）；仪表盘负责保存状态、暴露给外部读写。</p>
+<p>换句话说：<code>agent-loop.ts</code> 导出的 <code>runAgentLoop</code> 是一个不持有状态的纯函数，每次调用都要把当前状态完整传进去（<code>createContextSnapshot()</code>）；<code>Agent</code> 类的实例才持有真正的状态，负责保存状态、暴露给外部读写。</p>
 
 <h2>4. 调用 <code>prompt()</code> 时，事件是怎么流动的？</h2>
 
@@ -113,7 +113,7 @@
 
 <h2>下一步</h2>
 
-<p>下一课我们会打开 <code>agent-loop.ts</code>，看这个「引擎」内部一轮 turn 具体怎么跑：什么时候调 LLM、什么时候并行执行工具、什么时候决定继续或停下。在那之前，建议你：</p>
+<p>下一课我们会打开 <code>agent-loop.ts</code>，看 <code>runAgentLoop</code> 内部一轮 turn 具体怎么跑：什么时候调 LLM、什么时候并行执行工具、什么时候决定继续或停下。在那之前，建议你：</p>
 
 <ol>
 <li>通读 <a href="https://bojieli.github.io/ai-agent-book/" target="_blank">《深入理解 AI Agent》第一章</a>剩余部分（工具五分类、观察/动作空间）</li>
@@ -121,7 +121,7 @@
 </ol>
 
 <div class="callout ask-teacher">
-<p><strong>随时提问</strong>：这节课任何没弄懂的地方——公式、Model–Harness、reducer 模式、事件流——都可以直接问我（你的 AI 老师）。卡住了就问，不用等下一课。</p>
+<p><strong>随时提问</strong>：这节课任何没弄懂的地方——公式、Model–Harness、<code>processEvents</code> 怎么归约状态、事件流——都可以直接问我（你的 AI 老师）。卡住了就问，不用等下一课。</p>
 </div>
 
 <footer class="lesson-footer">Lesson 1 of the pi-agent-core architecture course · <a href="../reference/0001-agent-architecture-overview.html">参考卡片 →</a></footer>

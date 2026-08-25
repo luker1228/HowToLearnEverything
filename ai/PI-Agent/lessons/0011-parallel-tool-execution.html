@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 11 · 并行执行工具调用：哪一步真并行，哪一步还是顺序</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0010-session-tree.html">← Lesson 10</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0011-parallel-tool-execution.html">参考卡片：并行工具执行 →</a></div>
+
+<p class="kicker">Lesson 11 · agent-loop.ts</p>
+<h1>并行执行工具调用：哪一步真并行，哪一步还是顺序</h1>
+<p class="subtitle"><a href="../learning-records/0002-tool-execution-strategy-misconception.md">learning-records/0002</a> 已经确立过一条边界：模型只决定"调几个、调哪些工具"，"这一批工具具体怎么跑"是 harness 的决定。但那时只看到了"顺序 vs 并行"这个二选一的<strong>结果</strong>，没打开"并行"内部到底怎么实现。这节课打开它。</p>
+
+<h2>1. 问题：一条 assistant 消息带 3 个 toolCall，是不是从头到尾都同时跑？</h2>
+
+<p>如果答案是"是"，那 Lesson 8 讲过的权限确认应该怎么问？三个工具如果都要经过 <code>beforeToolCall</code> 权限检查，同时问三次，用户要在终端里同时回答三个问题吗？这个具体场景就是这节课要拆的第一个矛盾。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>executeToolCallsParallel</code> 里，"找工具 → prepareArguments → validateToolArguments → beforeToolCall 权限检查"这一整套准备工作，对三个 toolCall 是怎么跑的？</div>
+<div class="q-options">
+<button class="q-option">三个完全并发跑，包括权限检查</button>
+<button class="q-option" data-correct="true">准备阶段（含权限检查）依然按顺序一个一个跑完，只有真正的 <code>tool.execute()</code> 才并发</button>
+<button class="q-option">整个过程和 sequential 模式没区别，"parallel"只是个叫法</button>
+<button class="q-option">由每个工具自己声明是否要并发准备</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<h2>2. 真实代码：prepare 排队，execute 才真的并发</h2>
+
+<p><code>executeToolCallsParallel</code>（<code>agent-loop.ts:489-554</code>）先用一个普通 <code>for</code> 循环，<strong>逐个 <code>await</code></strong> 每个 toolCall 的准备阶段：</p>
+
+<pre>for (const toolCall of toolCalls) {
+	await emit({ type: "tool_execution_start", ... });
+	const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+	// ...
+	finalizedCalls.push(async () => {
+		const executed = await executePreparedToolCall(preparation, signal, emit);
+		return finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+	});
+}
+
+const orderedFinalizedCalls = await Promise.all(
+	finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
+);</pre>
+
+<p>注意：<code>for</code> 循环里 <code>await prepareToolCall(...)</code> 是真的等——第二个 toolCall 的准备工作，要等第一个准备完才开始。真正被塞进闭包、留到最后 <code>Promise.all</code> 才一起触发的，只有 <code>executePreparedToolCall</code>（调 <code>tool.execute()</code>）这一步。这不是我读代码猜的，<code>types.ts:34-41</code> 的官方注释直接写明白了：</p>
+
+<pre>// "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
+// tool_execution_end is emitted in tool completion order after each tool is finalized,
+// while tool-result message artifacts are emitted later in assistant source order.</pre>
+
+<h2>3. 对上 Lesson 8：这就是权限确认"一个一个问"的原因</h2>
+
+<p><code>beforeToolCall</code>（Lesson 8 讲过的权限钩子）就在这个<strong>顺序</strong>的准备阶段里面（见 <code>prepareToolCall</code>，<code>agent-loop.ts:600-651</code>）。所以即使这批工具最终会并发执行，权限确认永远是按模型发出 toolCall 的顺序一个一个问的——不存在"三个权限弹窗同时出现"的情况，因为准备阶段本来就没并发。</p>
+
+<h2>4. 顺序保证：事件可能乱序，喂给 LLM 的结果不会</h2>
+
+<p>三个工具真正并发跑之后，谁先跑完，<code>tool_execution_end</code> 事件就先发出去——这个事件流是<strong>按完成时间</strong>排的，可能和模型发出 toolCall 的顺序不一样。但最终要塞回 context、喂给下一轮 LLM 的 <code>ToolResultMessage[]</code>，用的是 <code>orderedFinalizedCalls</code>——闭包数组本身保持着 toolCalls 的原始顺序，<code>Promise.all</code> 的返回值天然按输入数组的顺序排列，跟谁先 resolve 无关。所以：<strong>UI 上看到的完成顺序可能乱，模型下一轮看到的结果顺序永远和它自己发起调用的顺序一致</strong>。</p>
+
+<div class="quiz" data-answer="ABC">
+<div class="q-prompt">小测验：模型一条消息里按顺序发出 toolCall A、B、C。B 是个很慢的 bash 命令，A、C 很快跑完。喂给下一轮 LLM 的 <code>ToolResultMessage</code> 顺序是？（填三个字母，不加分隔符，如 ABC）</div>
+<input type="text" class="q-input" placeholder="填写顺序">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h2>5. 谁能强制走 sequential：目前没有内置工具真的用它</h2>
+
+<p>回到 <a href="../reference/0002-tool-execution-strategy-misconception.md">0002</a> 的结论：<code>config.toolExecution === "sequential"</code>（Agent 级别整体配置）或者<strong>这一批里任何一个 toolCall 命中的工具</strong> <code>executionMode === "sequential"</code>（工具自己声明），两者任一为真，整批强制顺序（<code>agent-loop.ts:419-425</code>）。但搜一遍 <code>packages/agent/src/harness/tools/</code> 和 <code>packages/coding-agent/src/core/tools/</code> 里的内置工具（bash / edit / read / write ...），<strong>没有一个真的声明了 <code>executionMode: "sequential"</code></strong>——这个字段目前是留给未来的工具或第三方扩展用的钩子，跟 <a href="../learning-records/0006-prepare-arguments-purpose.md">0006</a> 里 <code>prepareArguments</code> 的情况、<a href="0009-skill-progressive-loading.html">Lesson 9</a> 里 <code>AgentHarness.skill()</code> 的情况，是同一种模式的第三次出现：<strong>通用的扩展点先造好，具体用不用是另一件事</strong>。</p>
+
+<h2>回答你的问题</h2>
+
+<p>"并行执行"这四个字在 pi 里精确的边界是：<strong>准备阶段（找工具、修参数形状、校验、权限审批）永远顺序跑</strong>，只有<strong>真正的 <code>tool.execute()</code></strong> 才会通过 <code>Promise.all</code> 并发。事件流会按真实完成顺序播报，但最终喂回模型的结果列表始终保持模型原始调用顺序。是否强制整批顺序执行，由 Agent 级别配置或单个工具的 <code>executionMode</code> 声明决定——但目前所有内置工具都没有用后者，"并行"是事实上的默认状态。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>：<code>pi/packages/agent/src/agent-loop.ts</code>（<code>executeToolCalls:411-426</code>、<code>executeToolCallsSequential:433-487</code>、<code>executeToolCallsParallel:489-554</code>、<code>prepareToolCall:600-651</code>），<code>pi/packages/agent/src/types.ts</code>（<code>ToolExecutionMode:34-42</code>、<code>AgentTool.executionMode:403-409</code>），<code>pi/packages/agent/src/harness/agent-harness.ts:258</code>（<code>toolExecution</code> 配置），<code>pi/packages/coding-agent/src/core/extensions/types.ts:467-473</code>（同一套字段暴露给第三方扩展）。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：prepare 阶段为什么设计成顺序而不是也并发、事件顺序和消息顺序为什么要分开保证——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 11 of the pi-agent-core architecture course · <a href="../reference/0011-parallel-tool-execution.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

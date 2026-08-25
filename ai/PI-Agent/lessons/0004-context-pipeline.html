@@ -98,7 +98,7 @@ const llmMessages = await config.convertToLlm(messages);</pre>
 <tr><td><strong>负责版</strong>（harness 提供的现成实现）</td><td><code>harness/messages.ts:124-168</code> <code>convertToLlm</code></td><td>渲染成文字——<code>bashExecution</code> 变成一条描述执行结果的 <code>user</code> 消息，<code>compactionSummary</code>/<code>branchSummary</code> 包一层 <code>&lt;summary&gt;</code> 标记后也变成 <code>user</code> 消息</td></tr>
 </table>
 
-<p>两者都符合同一个契约（<code>types.ts:159-160</code>）：<strong>不能抛错，遇到处理不了的类型必须给一个安全兜底</strong>（通常就是过滤掉），因为「抛错会打断整个循环、发不出正常的事件序列」。至于具体怎么翻译、翻译成什么样，完全由传进来的那个函数决定——<code>AgentLoopConfig.convertToLlm</code> 就是留给每个 App 自己填的一个洞。这正是「区分 AgentMessage 和 Message」换来的好处：核心引擎（<code>agent-loop.ts</code>）永远不需要知道 <code>bashExecution</code> 是什么，它只认「你给我一个能把任意 <code>AgentMessage[]</code> 变成合法 <code>Message[]</code> 的函数」。</p>
+<p>两者都符合同一个契约（<code>types.ts:159-160</code>）：<strong>不能抛错，遇到处理不了的类型必须给一个安全兜底</strong>（通常就是过滤掉），因为「抛错会打断整个循环、发不出正常的事件序列」。至于具体怎么翻译、翻译成什么样，完全由传进来的那个函数决定——<code>AgentLoopConfig.convertToLlm</code> 就是留给每个 App 自己填的一个洞。这正是「区分 AgentMessage 和 Message」换来的好处：<code>agent-loop.ts</code> 里的 <code>runAgentLoop</code> 永远不需要知道 <code>bashExecution</code> 是什么，它只认「你给我一个能把任意 <code>AgentMessage[]</code> 变成合法 <code>Message[]</code> 的函数」。</p>
 
 <h2>5. 用测试钉死执行顺序</h2>
 

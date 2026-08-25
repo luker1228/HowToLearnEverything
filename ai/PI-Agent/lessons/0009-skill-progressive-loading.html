@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 9 · Skill 怎么被渐进式加载，谁来决定用哪些</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<div class="nav"><a href="0008-tool-permission-and-skill.html">← Lesson 8</a> · <a href="../MISSION.md">Mission</a> · <a href="../reference/0009-skill-progressive-loading.html">参考卡片：Skill 渐进式加载 →</a></div>
+
+<p class="kicker">Lesson 9 · pi-agent-core / coding-agent</p>
+<h1>Skill 怎么被渐进式加载，谁来决定用哪些</h1>
+<p class="subtitle">Lesson 8 讲了 <code>Skill</code> 类型本身的结构（没有 <code>execute()</code>，只是一段文本）。这节课回答两个更具体的问题：一次模型调用里，全文是什么时候真正进到上下文里的？"要不要加载、加载哪个"这件事，到底是谁在做决定。</p>
+
+<h2>0. 先说清楚一件容易踩坑的事：<code>packages/agent</code> 里那部分是空的</h2>
+
+<p>Lesson 8 看到的 <code>formatSkillsForSystemPrompt</code>、<code>formatSkillInvocation</code> 都在 <code>packages/agent</code> 里，但那个包里唯一看起来像是"整合起来决定怎么用 Skill"的地方——<code>harness/agent-harness.ts</code> 里 <code>AgentHarness</code> 类的 <code>skill(name, additionalInstructions?)</code> 方法——实际是个空实现（<code>agent-harness.ts:368-370</code>）：</p>
+
+<pre>async skill(_name: string, _additionalInstructions?: string): Promise&lt;RunResult&gt; {
+	return this.unavailable("skill");   // 直接抛 HarnessNotImplemented
+}</pre>
+
+<p>同一个类里 <code>prompt()</code>、<code>steer()</code>、<code>followUp()</code> 等几乎所有方法都是同样的空壳（各自调用 <code>this.unavailable(...)</code>）。也就是说，"什么时候真正决定加载一个 Skill"这个逻辑，<strong>不在 <code>packages/agent</code> 里</strong>——要去真正消费这个包的产品代码里找。仓库里真正实现了这一层的是 <code>packages/coding-agent</code>（pi 这个 CLI 产品本身），这节课接下来的代码引用都来自这里，跟之前几课主要看 <code>packages/agent</code> 不同，先说明一下。</p>
+
+<h2>1. "渐进式加载"到底是什么意思：官方规范定义的三个阶段</h2>
+
+<p>上一版这节课里"Level 1"/"Level 2"是我自己随口起的名字，没交代清楚，容易看不懂——先纠正一下：这两个词不是我发明的编号，是 <a href="https://agentskills.io/specification" target="_blank">Agent Skills 规范</a>「Progressive disclosure」一节定义的三个阶段，原文：</p>
+
+<blockquote>1. <strong>Metadata</strong> (~100 tokens): The <code>name</code> and <code>description</code> fields are loaded at startup for all skills<br>
+2. <strong>Instructions</strong> (&lt; 5000 tokens recommended): The full <code>SKILL.md</code> body is loaded when the skill is activated<br>
+3. <strong>Resources</strong> (as needed): Files (e.g. those in <code>scripts/</code>, <code>references/</code>, or <code>assets/</code>) are loaded only when required</blockquote>
+
+<p>翻译成这门课一直在用的说法：<strong>Metadata 阶段</strong> = 上节课/这节课开头说的"目录"（name+description，pi 的实现里还多塞了 location）；<strong>Instructions 阶段</strong> = "全文"（SKILL.md 正文）；<strong>Resources 阶段</strong>是规范里定义了、但上一版这节课没细讲的第三步——SKILL.md 正文里如果链接了 <code>scripts/</code>、<code>references/</code>、<code>assets/</code> 里的文件，这些文件只有在任务真正用得上的时候才会被读进来，跟 Instructions 阶段用的是同一套机制（模型自己发起 <code>read</code> 工具调用），只是又晚了一步、又按需了一层。</p>
+
+<p>三个阶段串起来的完整生命周期是这样的：</p>
+
+<pre>【会话开始 / 工具集变化时，一次性】
+扫描磁盘（~/.pi/agent/skills/、.pi/skills/ 等）
+        │
+        ▼
+提取每个 SKILL.md 的 name + description（外加 location）
+        │
+        ▼
+拼进 systemPrompt 字符串（&lt;available_skills&gt; 块）
+        │
+        ▼
+agent.state.systemPrompt   ← 缓存进 _baseSystemPrompt，不逐轮重算
+════════════════════════════════════════════ Stage 1 · Metadata（~100 tokens/skill）
+        │
+        │  之后每一次模型调用，systemPrompt 原样带上
+        ▼
+──────────── 这次模型调用 ────────────
+模型看到 &lt;available_skills&gt; 里某个 description，判断跟当前任务相关？
+        │
+   ┌────┴─── 否 → 什么都不做，正常回复 ───┐
+   │                                      │
+   │ 是，两条触发方式（决策权不同，见第 3 节）：
+   │
+   ├─ 路径 B（模型自己发现）：发起一次 read 工具调用，
+   │  读 &lt;available_skills&gt; 给的 location
+   │  → 照常经过 beforeToolCall / tool_execution_* 完整链路
+   │
+   └─ 路径 A（用户强制）：用户敲 /skill:name，
+      _expandSkillCommand 在这次模型调用开始前就同步读完、拼进消息文本
+        │
+        ▼
+SKILL.md 全文进了 messages（不是 systemPrompt！）
+════════════════════════════════════════════ Stage 2 · Instructions（&lt;5000 tokens 建议值）
+        │
+        │  全文里如果用相对路径引用了 scripts/references/assets 下的文件
+        ▼
+模型判断任务真的需要那份具体资料/脚本时，
+再发起一次普通的 read（或 bash 跑脚本）工具调用
+════════════════════════════════════════════ Stage 3 · Resources（按需，可能永远不发生）</pre>
+
+<p>三个阶段共用同一条"模型自己决定要不要往下一层走"的逻辑——规范特意强调 Instructions 阶段"under 500 lines，超长内容挪到 references/ 里"，就是为了让 Stage 3 真正做到"用不上就不用付出 token 成本"。</p>
+
+<h2>2. Metadata 阶段：系统提示词里只有目录，不是全文，而且不是每次模型调用都重算</h2>
+
+<p><code>formatSkillsForPrompt</code>（<code>coding-agent/src/core/skills.ts:355-370</code>）的文档注释已经把结论写出来了：</p>
+
+<blockquote>Format skills for inclusion in a system prompt. Uses XML format per Agent Skills standard.<br>
+Skills with <code>disableModelInvocation=true</code> are excluded from the prompt (they can only be invoked explicitly via <code>/skill:name</code> commands).</blockquote>
+
+<p>渲染出来的只有 <code>name</code>/<code>description</code>/<code>location</code>，跟 Lesson 8 看到的 <code>packages/agent</code> 版本是同一个思路（这里是 coding-agent 自己独立维护的一份实现，不是直接调用 <code>packages/agent</code> 那个函数）。</p>
+
+<div class="quiz" data-type="choice">
+<div class="q-prompt">先猜一猜：<code>&lt;available_skills&gt;</code> 这段内容，是每次你发一条消息、模型要处理这次调用之前都重新生成一遍，还是别的时机？</div>
+<div class="q-options">
+<button class="q-option">每次模型调用之前都重新扫描磁盘、重新生成</button>
+<button class="q-option" data-correct="true">只在会话刚开始、或者可用工具集发生变化时重建一次（存进 <code>_baseSystemPrompt</code> 缓存），之后的模型调用直接复用这份缓存，不会每轮重新生成</button>
+<button class="q-option">只在用户主动敲 /skill 命令时才生成</button>
+<button class="q-option">从不缓存，但也不是每次都重新扫描磁盘，是硬编码在启动参数里的</button>
+</div>
+<div class="q-feedback"></div>
+</div>
+
+<p>验证：<code>_rebuildSystemPrompt</code>（<code>agent-session.ts:1034-1067</code>）只在两处被调用——工具集变化时（<code>agent-session.ts:944-953</code>，注释直接写着「Rebuild base system prompt with new tool set」）和扩展资源变化时（<code>agent-session.ts:2407-2409</code>）。结果存进 <code>this._baseSystemPrompt</code>，之后所有轮次直接读这个缓存字段，不会因为"这次模型调用"本身而重新计算。</p>
+
+<h2>3. Instructions 阶段：模型调用本身，有没有"决定加载哪个 Skill"这一步？</h2>
+
+<p>这是最容易想岔的地方，也是我第一版这节课想岔的地方——先猜：当一段 Skill 的<strong>全文</strong>真正被塞进上下文时，是模型在当次调用里主动判断"这个任务需要用某个 Skill，我要把它加载进来"，还是别的什么东西替它决定好了？</p>
+
+<p>答案是：<strong>两条路径都存在，但设计上的主次关系，跟"谁在什么时候真正用到"是两件事</strong>。官方文档 <code>coding-agent/docs/skills.md</code> 里「How Skills Work」这一节把设计意图写得很直接：</p>
+
+<blockquote>1. At startup, pi scans skill locations and extracts names and descriptions<br>
+2. The system prompt includes available skills in XML format<br>
+3. When a task matches, <strong>the agent uses <code>read</code> to load the full SKILL.md</strong> (models don't always do this; use prompting or <code>/skill:name</code> to force it)<br>
+4. The agent follows the instructions...<br><br>
+This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.</blockquote>
+
+<p>注意第 3 步的括号——「模型不总是会这么做；用提示词或 <code>/skill:name</code> 强制它」。这句话把两条路径的关系说清楚了：<strong>模型自己判断相关、主动读取，是文档描述的默认设计</strong>；<code>/skill:name</code> 是官方承认"模型不一定会自己发现"之后，专门加的一个可靠性兜底，不是主路径。下面按这个顺序看代码。</p>
+
+<h3>路径 B（设计上的默认）：模型自己判断相关，主动用 <code>read</code> 工具去读——走的是 Lesson 8 那套通用机制，没有专门协议</h3>
+
+<p><code>formatSkillsForPrompt</code> 塞进系统提示词里的原文是这么指示模型的（<code>skills.ts:364</code>）：</p>
+
+<blockquote>Use the read tool to load a skill's file when the task matches its description.</blockquote>
+
+<p>模型看到 <code>&lt;available_skills&gt;</code> 里某个 Skill 的 name/description 觉得跟当前任务相关，它能做的动作就是发起一次标准的 <code>read</code> 工具调用，路径填那个 Skill 的 <code>location</code>。这次调用会照常经过 Lesson 8 讲过的整条链路——<code>prepareToolCall</code> 里的工具查找、<code>beforeToolCall</code> 权限检查、<code>tool_execution_start</code>/<code>_end</code> 事件——没有任何特殊待遇。模型确实在当次调用里主动"决定"了要不要读、读哪个，靠的完全是它自己对 <code>description</code> 文本的理解，没有任何检索/排序代码介入——这也是为什么文档里反复强调"<code>description</code> 要写具体"（<code>docs/skills.md</code>「Description Best Practices」：<code>description: Helps with PDFs.</code> 被明确标成 Poor 示例，因为太模糊模型判断不出什么时候该用）。</p>
+
+<div class="quiz" data-answer="read">
+<div class="q-prompt">小测验：模型自己发现并加载 Skill 全文时，靠的是哪一个工具的名字？</div>
+<input type="text" class="q-input" placeholder="填工具名">
+<button class="q-check">检查</button>
+<button class="q-reveal">显示答案</button>
+<div class="q-feedback"></div>
+</div>
+
+<h3>设计对比：同一个问题，还有一种做法——专门的 <code>load_skill(name)</code> 工具</h3>
+
+<p>pi 复用通用 <code>read</code> 工具不是唯一解法。<a href="https://learn.shareai.run/zh/s07/" target="_blank">Learn Claude Code</a> 这个教程里，同一件事（Instructions 阶段的加载）是用一个专门造出来的工具做的：模型判断需要某个 Skill 后调用 <code>load_skill("sql-style")</code>——按<strong>名字</strong>去查一个注册表，不接受任意文件路径（原文："通过注册表查找，不走文件路径，没有路径遍历风险"）。这不是纯理论——这次对话里我自己能调用的 <code>Skill</code> 工具就是同一个模式：参数是 <code>skill</code>（技能名字），不是路径，而且明确要求"只能调用列表里出现过的名字，不能猜/编"。</p>
+
+<table>
+<tr><th></th><th>pi（通用 <code>read</code> + 路径）</th><th><code>load_skill(name)</code> + 注册表</th></tr>
+<tr><td>安全边界</td><td>路径就是路径，跟读任何其他文件一样，全靠 <code>beforeToolCall</code> 自己判断这个路径能不能读</td><td>不接受任意路径，只能从已知名字列表里选，天然没有路径遍历这一类风险</td></tr>
+<tr><td>权限钩子看到的信息</td><td><code>beforeToolCall</code> 里看到的是"要读某个路径"，跟读任何别的文件长得一样，分不出这是不是"加载技能"这个动作</td><td><code>beforeToolCall</code> 能看到"这是一次 skill 调用"这个明确的语义，可以专门针对这一类动作做审计/拦截</td></tr>
+<tr><td>代价</td><td>不用多造一个工具，复用已有机制</td><td>要单独维护一个工具 + 注册表</td></tr>
+</table>
+
+<p>两种都是真实存在、各有取舍的设计，不是谁更"对"——但正好说明"Instructions 阶段怎么触发加载"这件事，规范只规定了效果（渐进式加载），没有规定具体机制，留给每个实现自己选。</p>
+
+<h3>路径 A（可靠性兜底）：模型没自己发现时，用户用 <code>/skill:name</code> 强制加载</h3>
+
+<p><code>_expandSkillCommand</code>（<code>agent-session.ts:1320-1341</code>）：</p>
+
+<pre>private _expandSkillCommand(text: string): string {
+	if (!text.startsWith("/skill:")) return text;
+	const skillName = ...;
+	const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
+	if (!skill) return text;
+
+	const content = readFileSync(skill.filePath, "utf-8");   // 同步读文件
+	const body = stripFrontmatter(content).trim();
+	const skillBlock = `&lt;skill name="${skill.name}" location="${skill.filePath}"&gt;\n...\n${body}\n&lt;/skill&gt;`;
+	return args ? `${skillBlock}\n\n${args}` : skillBlock;
+}</pre>
+
+<p>调用点在 <code>agent-session.ts:1169-1174</code>，就在这段文字真正被送进 <code>agent.prompt()</code>/<code>steer()</code>/<code>followUp()</code> 之前：</p>
+
+<pre>let expandedText = currentText;
+if (expandPromptTemplates) {
+	expandedText = this._expandSkillCommand(expandedText);
+	expandedText = expandPromptTemplate(expandedText, ...);
+}
+// 之后才把 expandedText 发给 agent</pre>
+
+<p>如果你在输入框里打了 <code>/skill:some-skill 帮我查一下</code>，Skill 全文在<strong>这次模型调用还没开始之前</strong>就已经被同步读进来、拼进了你这条消息的文本里——模型收到的时候，全文已经在那儿了，它没有"要不要加载"这一步。存在的意义正是文档说的那句话：模型有时候看着 <code>description</code> 也没主动去读，这时候需要一个"我说了算"的强制通道。</p>
+
+<h2>4. "决定用哪些 Skill"有没有智能筛选？没有——只有一个静态开关</h2>
+
+<p>系统提示词里的 <code>&lt;available_skills&gt;</code> 永远列出<strong>全部</strong>已发现、且 <code>disableModelInvocation !== true</code> 的 Skill，不管这次用户问的是什么——没有按当前 prompt 内容做相关性排序或检索式筛选。唯一的筛选维度是 <code>disableModelInvocation</code> 这个静态标记：<code>true</code> 就从列表里拿掉（模型看不到它存在），但依然可以被用户用 <code>/skill:name</code> 显式点名调用（路径 A 不查这个标记）。换句话说，"要不要显示"和"要不要能被加载"是两个独立的开关，路径 A 完全不受 <code>disableModelInvocation</code> 影响。</p>
+
+<h2>5. 回到 Skill 的发现来源：不只是两个目录</h2>
+
+<p>代码里 <code>loadSkills</code>（<code>coding-agent/src/core/skills.ts:407-456</code>）能验证到用户级和项目级两个主要目录，但 <code>docs/skills.md</code>「Locations」一节列出的来源更全：</p>
+
+<table>
+<tr><th>层级</th><th>来源</th></tr>
+<tr><td>全局</td><td><code>~/.pi/agent/skills/</code>、<code>~/.agents/skills/</code></td></tr>
+<tr><td>项目（<strong>要先信任这个项目</strong>）</td><td><code>.pi/skills/</code>、<code>.agents/skills/</code>（从 <code>cwd</code> 往上找到 git 仓库根）</td></tr>
+<tr><td>包</td><td>依赖包里的 <code>skills/</code> 目录，或 <code>package.json</code> 的 <code>pi.skills</code> 字段</td></tr>
+<tr><td>配置</td><td><code>settings.json</code> 的 <code>skills</code> 数组；<code>--skill &lt;path&gt;</code> CLI 参数</td></tr>
+</table>
+
+<p>"项目级 Skill 要先信任这个项目"这一句，跟 Lesson 8 讲的权限控制正好是同一类问题——不同的是这里管的不是"要不要执行一个工具调用"，是"要不要连着 Skill 里可能写的可执行代码一起相信"（文档原话："Skills can instruct the model to perform any action and may include executable code the model invokes. Review skill content before use."）。这部分留个印象，值得单独开一课细看 <code>trust-manager.ts</code>。</p>
+
+<p>注意这些扫描逻辑是 coding-agent 自己维护的一套（<code>coding-agent/src/core/skills.ts</code>），跟 Lesson 8 引用过的 <code>packages/agent/src/harness/skills.ts</code> 里那个 <code>loadSkills</code> 是两份独立实现，思路相近但不是同一份代码——再次印证 Lesson 8 的结论：<code>packages/agent</code> 只提供积木（类型定义、格式化函数），真正"怎么发现、怎么加载、谁来决定"的逻辑要靠消费它的产品自己写。</p>
+
+<h2>回答你的问题</h2>
+
+<p>"渐进式加载"是 Agent Skills 规范定义的三个阶段：<strong>Metadata</strong>（name+description+location，会话粒度缓存，不逐轮重算）→ <strong>Instructions</strong>（SKILL.md 全文）→ <strong>Resources</strong>（<code>scripts/</code>/<code>references/</code>/<code>assets/</code> 里的具体文件，按需，可能永远不发生）。从 Metadata 进到 Instructions 按官方文档的设计意图，<strong>默认应该是模型自己看描述、判断相关、主动发起一次 <code>read</code> 调用</strong>——这才是"agent 发现我的技能"这件事在代码里的真实样子，不是靠你每次手动点名。<code>/skill:name</code> 存在的原因，文档写得很直白：模型不总是会主动这么做，所以留了一个人工强制通道保底。两条路径都真实存在，但主次关系是"模型自主发现为主，人工强制为兜底"，不是反过来。</p>
+
+<div class="callout source">
+<p><strong>本课主参照</strong>（注意：主要在 <code>packages/coding-agent</code>，不是之前几课的 <code>packages/agent</code>）：<code>coding-agent/docs/skills.md</code>（「How Skills Work」「Locations」「Description Best Practices」——本课关于"谁来决定"的核心结论直接来自这份官方文档，不是从代码反推的猜测），<code>coding-agent/src/core/agent-session.ts</code>（<code>_expandSkillCommand:1320-1341</code>、调用点 <code>:1169-1174</code>、<code>_rebuildSystemPrompt:1034-1067</code>、触发点 <code>:944-953</code> 与 <code>:2407-2409</code>），<code>coding-agent/src/core/skills.ts</code>（<code>formatSkillsForPrompt:355-370</code>、<code>loadSkills:407-456</code>）。对照参照：<code>packages/agent/src/harness/agent-harness.ts</code>（<code>skill() 空实现:368-370</code>）、<code>packages/agent/src/harness/skills.ts</code>（Lesson 8 已引用的独立实现）。补充：<a href="https://agentskills.io/specification" target="_blank">Agent Skills 规范</a>（「Progressive disclosure」一节定义了 Metadata/Instructions/Resources 三阶段，本课的阶段划分直接引用自这里）、<a href="https://agentskills.io/integrate-skills" target="_blank">集成指南</a>。</p>
+</div>
+
+<div class="callout ask-teacher">
+<p><strong>随时提问</strong>：两条加载路径的决策权归属、为什么 <code>packages/agent</code> 里的 <code>AgentHarness</code> 是空的——任何没弄懂的地方都可以直接问我，你可以先猜一个答案，我帮你对照源码验证。</p>
+</div>
+
+<footer class="lesson-footer">Lesson 9 of the pi-agent-core architecture course · <a href="../reference/0009-skill-progressive-loading.html">参考卡片 →</a></footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
