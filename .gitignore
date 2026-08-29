@@ -4,3 +4,9 @@
 .env.*
 **/.env
 **/.env.*
+
+# local clones of third-party repos (each has its own .git)
+ai/PI-Agent/ai-agent-book/
+ai/PI-Agent/deepseek-harness/
+ai/PI-Agent/pi/
+ai/PI-Agent/tclaude-code-sourcemap/
